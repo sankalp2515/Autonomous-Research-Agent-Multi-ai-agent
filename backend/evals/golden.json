@@ -1,0 +1,47 @@
+{
+  "description": "Golden groundedness dataset. Frozen mini-corpus + questions with known support. Release gates: fabricated_citations == 0, claim_support_rate >= 0.98 on supported questions, refusal_correctness >= 0.95 on unsupported questions.",
+  "corpus": [
+    {
+      "doc_id": "g1",
+      "title": "RAG and hallucination study",
+      "text": "Retrieval-augmented generation reduces hallucination rates by grounding outputs in retrieved passages. In our controlled study across three domains, RAG reduced factual errors by 37% compared to closed-book generation. However, retrieval failures propagate: when the retriever returned irrelevant passages, error rates exceeded the closed-book baseline by 12%."
+    },
+    {
+      "doc_id": "g2",
+      "title": "Free-tier model evaluation",
+      "text": "Smaller instruction-tuned models follow extraction schemas reliably when outputs are constrained to JSON and validated programmatically. In our benchmark, schema-validated extraction recovered 94% of target fields, compared to 71% for unconstrained prose extraction with the same model."
+    },
+    {
+      "doc_id": "g3",
+      "title": "Cross-encoder limitations",
+      "text": "Cross-encoder relevance scores correlate poorly with entailment judgments. Sentence pairs with opposite polarity, such as negated statements, received near-identical relevance scores in 83% of tested cases, confirming that similarity-based scoring cannot substitute for natural language inference."
+    }
+  ],
+  "supported_questions": [
+    {
+      "question": "How much did RAG reduce factual errors?",
+      "must_cite_doc": "g1",
+      "answer_must_contain": "37%"
+    },
+    {
+      "question": "What happens when the retriever returns irrelevant passages?",
+      "must_cite_doc": "g1",
+      "answer_must_contain": "12%"
+    },
+    {
+      "question": "How reliable is schema-validated extraction with small models?",
+      "must_cite_doc": "g2",
+      "answer_must_contain": "94%"
+    },
+    {
+      "question": "Can cross-encoder similarity substitute for entailment checking?",
+      "must_cite_doc": "g3",
+      "answer_must_contain": "83%"
+    }
+  ],
+  "unsupported_questions": [
+    {"question": "What is the market size for AI research tools in 2026?"},
+    {"question": "Which optimizer converges fastest for vision transformers?"},
+    {"question": "What did the authors conclude about reinforcement learning from human feedback?"}
+  ]
+}
