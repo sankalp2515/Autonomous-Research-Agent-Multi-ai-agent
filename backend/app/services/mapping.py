@@ -66,7 +66,18 @@ async def build_map(session: AsyncSession, project_id: str) -> dict:
 
     # Citation edges (best-effort, directional): for papers with an S2-
     # resolvable id, fetch their references and link to corpus papers they
-    # cite. Bounded + fail-soft so a slow/absent S2 never breaks the map.
+    # cite. TODO/disabled by default — the S2 references API is rate-limited
+    # without a key and made the map hang; similarity edges (below) are local
+    # and fast. Flip settings.map_citation_edges_enabled to re-enable.
+    from app.core.config import get_settings
+    if not get_settings().map_citation_edges_enabled:
+        sim_edges = [{"src": a, "dst": b, "weight": round(w, 3), "kind": "similar"}
+                     for (a, b), w in pair_w.items()]
+        logger.info("map built (similarity only)",
+                    extra={"project_id": project_id, "nodes": len(nodes),
+                           "similar": len(sim_edges)})
+        return {"nodes": nodes, "edges": sim_edges}
+
     from app.agents.sources import fetch_references
 
     by_arxiv = {d.arxiv_id: d.id for d in docs if d.arxiv_id}

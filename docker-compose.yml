@@ -1,3 +1,9 @@
+# Host ports are configurable (twelve-factor: config via environment) because
+# they collide with whatever else a dev machine runs — and on Windows, winnat
+# reserves arbitrary ranges (6262-6361 ate 6333 here). Override in a root .env:
+#   POSTGRES_PORT=5433
+#   REDIS_PORT=6380
+#   QDRANT_PORT=6400
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,7 +12,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: research
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,7 +25,7 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6380:6379"
+      - "${REDIS_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -31,8 +37,8 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.12.4
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
@@ -52,12 +58,43 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/research
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
+      # Open by default so the one-command demo needs no Supabase setup. Set
+      # AUTH_DISABLED=false in a root .env (with VITE_SUPABASE_* build args) to
+      # turn sign-in on. `environment` wins over env_file, so this is the knob.
+      AUTH_DISABLED: "${AUTH_DISABLED:-true}"
+      # Traces flow here when OTEL_ENABLED=true (set in backend/.env) and the
+      # observability profile is up. Harmless no-op otherwise.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: veriscope-api
+      # Persist the HF model cache (below) and authenticate downloads so a
+      # fresh container doesn't re-fetch ~500MB and get rate-limited (which
+      # hung the worker for >10min). Fail fast instead of hanging forever.
+      HF_HOME: /models
+      HF_HUB_DOWNLOAD_TIMEOUT: "30"
+    volumes:
+      - hf_cache:/models
     ports:
       - "8210:8000"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       qdrant: { condition: service_healthy }
+
+  # The whole app at one URL. `docker compose --profile app up` builds the UI,
+  # serves it via nginx, and proxies /api to the api container — a reviewer just
+  # opens http://localhost:${WEB_PORT:-8080}. Auth is off by default (open demo);
+  # pass VITE_SUPABASE_* as build args to enable sign-in.
+  frontend:
+    profiles: ["app"]
+    build:
+      context: ./frontend
+      args:
+        VITE_SUPABASE_URL: "${VITE_SUPABASE_URL:-}"
+        VITE_SUPABASE_ANON_KEY: "${VITE_SUPABASE_ANON_KEY:-}"
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - api
 
   worker:
     profiles: ["app"]
@@ -68,12 +105,25 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/research
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: veriscope-worker
+      # Model cache + authenticated, bounded downloads (see api service above).
+      HF_HOME: /models
+      HF_HUB_DOWNLOAD_TIMEOUT: "30"
+    volumes:
+      - hf_cache:/models
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       qdrant: { condition: service_healthy }
 
+# NOTE: the observability stack (Prometheus/Grafana/Loki/Tempo/Promtail) lives
+# in its OWN compose file — docker-compose.observability.yml — deliberately.
+# Co-launching it with the ML worker OOM-killed this host once (exit 137).
+# See that file for how to run it and its memory requirements.
+
 volumes:
   pg_data:
   redis_data:
   qdrant_data:
+  hf_cache:      # embedding/rerank/NLI models — download once, survive restarts

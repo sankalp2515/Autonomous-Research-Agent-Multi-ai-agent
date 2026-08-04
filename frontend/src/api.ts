@@ -4,7 +4,7 @@ import type {
 } from "./types";
 import { getToken } from "./auth";
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
   }
@@ -76,10 +76,13 @@ export const api = {
       `/api/projects/${projectId}/map${refresh ? "?refresh=1" : ""}`
     ),
 
-  startPipeline: (projectId: string, query: string) =>
+  startPipeline: (
+    projectId: string, query: string,
+    scope: "all" | "papers" = "all", sinceYear = 0
+  ) =>
     request<{ run_id: string }>("/api/pipeline", {
       method: "POST",
-      body: JSON.stringify({ project_id: projectId, query }),
+      body: JSON.stringify({ project_id: projectId, query, scope, since_year: sinceYear }),
     }),
   listRuns: (projectId: string) =>
     request<Run[]>(`/api/projects/${projectId}/runs`),
@@ -129,6 +132,10 @@ export const api = {
     request<{ contradictions: import("./types").Contradiction[] }>(
       `/api/report/${reportId}/contradictions`
     ),
+  getReportMetrics: (reportId: string) =>
+    request<import("./types").ReportMetrics>(`/api/report/${reportId}/metrics`),
+  getNextQuestions: (reportId: string) =>
+    request<{ questions: string[] }>(`/api/report/${reportId}/next-questions`),
 
   chat: (projectId: string, question: string, documentId?: string) =>
     request<ChatResult>("/api/chat", {
@@ -186,6 +193,55 @@ export const api = {
     request<{ id: string }>(`/api/alerts/${alertId}/dismiss`, { method: "POST" }),
   addAlert: (alertId: string) =>
     request<{ document_id: string }>(`/api/alerts/${alertId}/add`, { method: "POST" }),
+
+  listMemory: (projectId: string) =>
+    request<{ id: string; kind: string; text: string; source_ref: string; created_at: string }[]>(
+      `/api/projects/${projectId}/memory`
+    ),
+  recallMemory: (projectId: string, q: string, k = 5) =>
+    request<{ results: { id: string; kind: string; text: string; score: number }[] }>(
+      `/api/projects/${projectId}/memory/recall?q=${encodeURIComponent(q)}&k=${k}`
+    ),
+  addMemory: (projectId: string, text: string, kind = "preference") =>
+    request<{ id: string; kind: string }>(`/api/projects/${projectId}/memory`, {
+      method: "POST",
+      body: JSON.stringify({ text, kind }),
+    }),
+
+  getResume: (projectId: string) =>
+    request<import("./types").ResumeData>(`/api/projects/${projectId}/resume`),
+  resumeRun: (runId: string) =>
+    request<{ run_id: string; status: string }>(`/api/runs/${runId}/resume`, {
+      method: "POST",
+    }),
+
+  createComparison: (
+    projectId: string,
+    data: { document_ids: string[]; dimensions?: string[]; title?: string }
+  ) =>
+    request<import("./types").Comparison>(`/api/projects/${projectId}/compare`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  listComparisons: (projectId: string) =>
+    request<import("./types").ComparisonSummary[]>(
+      `/api/projects/${projectId}/comparisons`
+    ),
+  getComparison: (id: string) =>
+    request<import("./types").Comparison>(`/api/comparisons/${id}`),
+  toggleComparisonReport: (id: string) =>
+    request<{ id: string; include_in_report: boolean }>(
+      `/api/comparisons/${id}/toggle-report`,
+      { method: "POST" }
+    ),
+  deleteComparison: (id: string) =>
+    request<{ deleted: boolean }>(`/api/comparisons/${id}`, { method: "DELETE" }),
+  recommendSources: (projectId: string, seedIds: string[], k = 6) =>
+    request<{ recommendations: import("./types").Recommendation[] }>(
+      `/api/projects/${projectId}/recommend?seed=${encodeURIComponent(
+        seedIds.join(",")
+      )}&k=${k}`
+    ),
 
   saveToNotebook: (projectId: string, claimId: string, note = "") =>
     request<{ id: string; saved: boolean }>(`/api/projects/${projectId}/notebook`, {

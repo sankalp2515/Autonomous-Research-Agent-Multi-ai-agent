@@ -72,18 +72,63 @@ async def acquire_token(provider: str, rpm: int) -> bool:
 
 # ── Run progress (read by /api/status, written by the worker) ────────────
 
+def _channel(run_id: str) -> str:
+    return f"run:channel:{run_id}"
+
+
 async def publish_progress(run_id: str, payload: dict[str, Any]) -> None:
     r = get_redis()
     payload = {**payload, "at": time.time()}
-    await r.set(f"run:progress:{run_id}", json.dumps(payload), ex=3600)
-    await r.rpush(f"run:events:{run_id}", json.dumps(payload))
+    blob = json.dumps(payload)
+    # Snapshot (for reconnects / initial render) + append-only event log …
+    await r.set(f"run:progress:{run_id}", blob, ex=3600)
+    await r.rpush(f"run:events:{run_id}", blob)
     await r.expire(f"run:events:{run_id}", 3600)
     await r.ltrim(f"run:events:{run_id}", -200, -1)
+    # … and a fan-out publish so SSE subscribers wake instantly instead of
+    # polling every second (the snapshot key covers anyone who reconnects).
+    await r.publish(_channel(run_id), blob)
 
 
 async def read_progress(run_id: str) -> dict[str, Any] | None:
     raw = await get_redis().get(f"run:progress:{run_id}")
     return json.loads(raw) if raw else None
+
+
+async def subscribe_progress(run_id: str):
+    """Async generator yielding progress payloads pushed for a run. Pub/Sub
+    replaces per-second polling; the caller still reads the snapshot first (to
+    catch anything published before subscribing) and periodically re-reads it
+    as a backstop for missed messages. Always closes the subscription."""
+    pubsub = get_redis().pubsub()
+    await pubsub.subscribe(_channel(run_id))
+    try:
+        while True:
+            msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=10.0)
+            if msg is None:
+                yield None  # idle tick — lets the caller re-check terminal state
+                continue
+            data = msg.get("data")
+            if data:
+                try:
+                    yield json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+    finally:
+        try:
+            await pubsub.unsubscribe(_channel(run_id))
+            await pubsub.aclose()
+        except Exception:
+            pass
+
+
+# ── Distributed lock (single-leader startup work across N workers) ───────
+
+async def acquire_lock(name: str, ttl: int = 60) -> bool:
+    """Best-effort mutual exclusion via SET NX EX. Returns True to exactly one
+    caller within the TTL window. Used to make startup orphan-recovery safe
+    when more than one worker boots concurrently."""
+    return bool(await get_redis().set(f"lock:{name}", "1", nx=True, ex=ttl))
 
 
 async def read_events(run_id: str) -> list[dict[str, Any]]:

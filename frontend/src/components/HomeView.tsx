@@ -25,12 +25,16 @@ export default function HomeView({
 }: {
   projects: Project[];
   apiDown: boolean;
-  onLaunch: (query: string) => Promise<void>;
+  onLaunch: (query: string, scope: "all" | "papers", sinceYear: number) => Promise<void>;
   onOpenProject: (p: Project) => void;
 }) {
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Practitioner sources (GitHub/blogs) are disabled for now — runs are
+  // scholarly-only. TODO: restore the source selector when they return.
+  const scope = "papers" as const;
+  const [since, setSince] = useState(0); // 0 = any time
 
   async function launch(q: string) {
     const text = q.trim();
@@ -38,12 +42,21 @@ export default function HomeView({
     setBusy(true);
     setError("");
     try {
-      await onLaunch(text);
+      await onLaunch(text, scope, since);
     } catch (err: any) {
       setError(String(err.message ?? err));
       setBusy(false);
     }
   }
+
+  const CUR = new Date().getFullYear();
+  const periods: { label: string; year: number }[] = [
+    { label: "Any time · recency prioritized", year: 0 },
+    { label: `Last 2 years (since ${CUR - 2})`, year: CUR - 2 },
+    { label: `Last 5 years (since ${CUR - 5})`, year: CUR - 5 },
+    { label: "Since 2020", year: 2020 },
+    { label: "Since 2015", year: 2015 },
+  ];
 
   return (
     <div className="hero">
@@ -79,8 +92,19 @@ export default function HomeView({
           disabled={busy || apiDown}
         />
         <div className="composer-foot">
+          <label className="source-select" title="Restrict sources to a time window">
+            <span className="source-label">Period</span>
+            <select value={since} onChange={(e) => setSince(Number(e.target.value))}
+                    disabled={busy || apiDown}>
+              {periods.map((p) => (
+                <option key={p.year} value={p.year}>{p.label}</option>
+              ))}
+            </select>
+          </label>
           <span className="hint">
-            Scholarly evidence and practitioner sources are reported separately — never blended.
+            {since
+              ? `Only sources from ${since} onward — shown per source so you can verify.`
+              : "Newest evidence prioritized by default; every source shows its year."}
           </span>
           <button
             className="composer-send"
@@ -94,9 +118,8 @@ export default function HomeView({
       </div>
       {error && <p style={{ color: "var(--bad)", textAlign: "center" }}>{error}</p>}
       {apiDown && (
-        <p style={{ color: "var(--bad)", textAlign: "center", fontSize: 13 }}>
-          Backend offline — run <code className="mono">uvicorn app.main:app --port 8200</code> and{" "}
-          <code className="mono">python -m app.worker</code>.
+        <p style={{ color: "var(--warn)", textAlign: "center", fontSize: 13 }}>
+          Can’t reach the API right now — if this persists, check that the backend service is running.
         </p>
       )}
 

@@ -1,0 +1,21 @@
+# Minimal single-binary Tempo: receive OTLP, store traces on local disk.
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:      # OTLP/HTTP on :4318 (what the app exports to)
+        grpc:      # OTLP/gRPC on :4317
+
+ingester:
+  max_block_duration: 5m
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal

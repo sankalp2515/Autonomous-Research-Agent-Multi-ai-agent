@@ -31,5 +31,7 @@ models/
 Thumbs.db
 .idea/
 .vscode/
-.env.example
 .claude
+
+# Interview prep — personal, not part of the public project
+docs/INTERVIEW.md

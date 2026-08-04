@@ -1,0 +1,39 @@
+# Ships Docker container stdout (our structured JSON logs) to Loki, parsing
+# the JSON so level / logger / run_id / request_id become queryable labels.
+# Linux VM only (uses the Docker socket for service discovery).
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+    relabel_configs:
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: stream
+    pipeline_stages:
+      # Our app logs are JSON; lift the useful fields into labels + keep the
+      # message readable in Grafana.
+      - json:
+          expressions:
+            level: level
+            logger: logger
+            run_id: run_id
+            request_id: request_id
+            message: message
+      - labels:
+          level:
+          logger:
+      - output:
+          source: message

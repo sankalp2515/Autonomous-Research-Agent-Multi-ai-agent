@@ -263,3 +263,52 @@ class Note(TimestampMixin, Base):
     # Optional provenance: the quote/source a note was seeded from.
     source_ref: Mapped[str] = mapped_column(Text, default="")
     claim_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class Comparison(TimestampMixin, Base):
+    """A persistent cross-paper comparison the researcher assembles by hand.
+
+    The user picks 2-5 documents from the project corpus; for each (document ×
+    comparison dimension) cell we draft a grounded claim and run it through the
+    SAME verification gate as the pipeline — so every populated cell carries a
+    verbatim quote + chunk evidence and is click-to-source. Empty cells are an
+    honest 'the source doesn't address this', never a fabrication.
+
+    Stored as durable truth so a comparison survives the session (part of the
+    persistent library) and can be exported or included in a report.
+    """
+    __tablename__ = "comparisons"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(String(32), index=True)
+    title: Mapped[str] = mapped_column(Text, default="")
+    document_ids: Mapped[list] = mapped_column(JSON, default=list)
+    dimensions: Mapped[list] = mapped_column(JSON, default=list)
+    # matrix: [{ "dimension": str, "cells": { document_id: {claim, quote,
+    #            chunk_id, claim_id, page, verified} | null } }]
+    matrix: Mapped[list] = mapped_column(JSON, default=list)
+    include_in_report: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    __table_args__ = (Index("ix_comparisons_project_created", "project_id", "created_at"),)
+
+
+class Memory(TimestampMixin, Base):
+    """Cross-session agent memory. Unlike the corpus (raw sources) or claims
+    (per-report), a Memory persists across runs so later work can recall what
+    this project already established. Kinds:
+      episodic  - a summary of a past run (what was researched, key findings)
+      semantic  - a durable verified fact worth remembering
+      preference - a user/project directive on how to research
+    The embedding (when the local model is available) powers semantic recall;
+    recall degrades to keyword+recency without it."""
+    __tablename__ = "memories"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(String(32), index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="episodic")
+    text: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    source_ref: Mapped[str] = mapped_column(Text, default="")
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (Index("ix_memories_project_kind", "project_id", "kind"),)

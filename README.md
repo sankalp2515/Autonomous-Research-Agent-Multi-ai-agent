@@ -49,14 +49,12 @@ Most AI research tools fabricate — plausible summaries with citations that are
 **Veriscope flips the default: nothing reaches you unless it survives a verification gate.** A multi-agent pipeline searches arXiv, Semantic Scholar, GitHub and engineering blogs, then drafts a report where **every claim must (1) cite a real chunk, (2) carry a verbatim quote that exact-matches that chunk, and (3) pass an NLI entailment check.** Failing claims are dropped or shown as honest gaps; citations render only from resolved references, so **fabricated citations are structurally impossible**; when the corpus can't answer, it **refuses** instead of guessing.
 
 ```bash
-docker compose up -d                       # Postgres + Redis + Qdrant
-cp .env.example backend/.env               # add free LLM keys, set AUTH_DISABLED=true
-cd backend && python -m venv .venv && .venv/Scripts/activate
-pip install -e . && pip install -e ".[ml]"
-uvicorn app.main:app --port 8210           # terminal 1: API
-python -m app.worker                       # terminal 2: worker
-cd ../frontend && npm install && npm run dev   # terminal 3: UI → http://localhost:5173
+cp .env.example backend/.env               # add free LLM keys (open demo, no auth)
+docker compose --profile app up --build    # UI + API + worker + Postgres/Redis/Qdrant
+# → open http://localhost:8080
 ```
+
+<sub>Prefer running from source? See [Quick start (local)](#quick-start-local) for the venv + `npm run dev` flow.</sub>
 
 ## The problem
 
@@ -167,12 +165,26 @@ Open **http://localhost:5173**. Without `[ml]`, retrieval degrades to BM25 and N
 
 ## Run with Docker
 
-The app itself is containerised (`backend/Dockerfile`); the `app` compose profile builds and runs API + worker alongside the infra:
+**One command runs the whole thing** — UI, API, worker, and infra. The `app`
+profile now includes a containerised frontend (nginx serving the built bundle
+and proxying `/api` to the backend), so the entire app lives at a single URL:
 
 ```bash
-docker compose --profile app up --build              # infra + API (:8210) + worker
-docker compose --profile app up --scale worker=3     # horizontal scaling (job claim is atomic)
+cp .env.example backend/.env            # add your free LLM keys (see below)
+docker compose --profile app up --build # UI + API + worker + Postgres/Redis/Qdrant
+# → open http://localhost:8080
 ```
+
+- **Zero-config auth:** the demo runs open by default (`AUTH_DISABLED=true`), so
+  no Supabase is needed — visitors hit the landing page, click *Get started*,
+  and go straight into the workspace.
+- **Enable sign-in:** set `AUTH_DISABLED=false` in a root `.env` and pass
+  `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` as build args.
+- **Change the port:** `WEB_PORT=3000 docker compose --profile app up`.
+- **Scale workers:** `docker compose --profile app up --scale worker=3` (job claim is atomic).
+
+Only the LLM keys in `backend/.env` are required — everything else has a working
+default.
 
 ## API
 

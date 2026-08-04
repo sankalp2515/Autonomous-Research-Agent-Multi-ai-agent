@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { api, ApiError } from "./api";
 import type { Project } from "./types";
 import ChatView from "./components/ChatView";
 import DocumentsView from "./components/DocumentsView";
@@ -9,13 +9,85 @@ import HomeView from "./components/HomeView";
 import NotebookView from "./components/NotebookView";
 import NotesView from "./components/NotesView";
 import MonitorView from "./components/MonitorView";
-import MapView from "./components/MapView";
+import MemoryView from "./components/MemoryView";
+// Code-split: the Map view runs a force-directed SVG simulation and is opened
+// rarely — keep it out of the initial bundle so first paint is lighter.
+const MapView = lazy(() => import("./components/MapView"));
+import CompareView from "./components/CompareView";
+import MetricsView from "./components/MetricsView";
+import AboutView from "./components/AboutView";
+import ResumeBanner from "./components/ResumeBanner";
 import Login from "./components/Login";
+import Landing from "./components/Landing";
 import NewProjectModal from "./components/NewProjectModal";
 import ProfileMenu from "./components/ProfileMenu";
 import { authEnabled, initAuth } from "./auth";
 
-type View = "home" | "chat" | "runs" | "report" | "documents" | "notebook" | "monitor" | "notes" | "map";
+type View = "home" | "chat" | "runs" | "report" | "documents" | "notebook" | "monitor" | "notes" | "map" | "memory" | "compare" | "metrics" | "about";
+
+// Secondary capabilities live behind one "Tools" dropdown (Elicit-style)
+// instead of a crowded row of buttons — keeps the top bar calm.
+const TOOLS: { id: View; label: string; glyph: string; hint: string }[] = [
+  { id: "documents", label: "Sources", glyph: "⌥", hint: "Source documents in this project" },
+  { id: "compare", label: "Compare", glyph: "⊞", hint: "Compare papers side-by-side, verified cell-by-cell" },
+  { id: "map", label: "Map", glyph: "◬", hint: "Explore the corpus, select papers to compare" },
+  { id: "metrics", label: "Metrics", glyph: "◷", hint: "RAG evaluation dashboard — traced to evidence" },
+  { id: "monitor", label: "Monitor", glyph: "◷", hint: "Standing watches for new papers" },
+  { id: "about", label: "About", glyph: "ⓘ", hint: "What this is & how it works" },
+  { id: "memory", label: "Memory", glyph: "◈", hint: "What this project remembers across runs" },
+  { id: "notes", label: "Notes", glyph: "✎", hint: "Your own research notes & synthesis" },
+  { id: "notebook", label: "Notebook", glyph: "★", hint: "Verbatim findings saved across reports" },
+];
+
+function ToolsMenu({
+  view,
+  onPick,
+  docCount,
+}: {
+  view: View;
+  onPick: (v: View) => void;
+  docCount: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const active = TOOLS.some((t) => t.id === view);
+  return (
+    <div className="tools-menu" ref={ref}>
+      <button className={`steptab quiet ${active ? "active" : ""}`} onClick={() => setOpen((o) => !o)}>
+        ⋯ Tools <span style={{ opacity: 0.6 }}>▾</span>
+      </button>
+      {open && (
+        <div className="tools-dropdown">
+          {TOOLS.map((t) => (
+            <button
+              key={t.id}
+              className={`tools-item ${view === t.id ? "active" : ""}`}
+              onClick={() => {
+                onPick(t.id);
+                setOpen(false);
+              }}
+            >
+              <span className="tools-glyph">{t.glyph}</span>
+              <span className="tools-text">
+                <b>{t.label}</b>
+                <small>{t.hint}</small>
+              </span>
+              {t.id === "documents" && <span className="tools-count mono">{docCount}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // One linear mental model: Research -> Report -> Ask. Sources is a quiet
 // utility. (Graph and Refind retired from the nav to keep the flow obvious.)
@@ -30,19 +102,51 @@ export default function App() {
   const [selected, setSelected] = useState<Project | null>(null);
   const [view, setView] = useState<View>("home");
   const [reportId, setReportId] = useState<string | null>(null);
-  const [apiDown, setApiDown] = useState(false);
+  // "ok" | "down" (server unreachable) | "auth" (reachable but needs sign-in).
+  // Conflating these sent users chasing a dead backend when the real issue was
+  // an expired/missing session.
+  const [apiState, setApiState] = useState<"ok" | "down" | "auth">("ok");
+  const apiDown = apiState !== "ok";
   const [authed, setAuthed] = useState(!authEnabled);
+  // Landing page gate: shown once per browser session, before auth. A deep
+  // link (hash route into a project) skips it so shared links land directly.
+  const [entered, setEntered] = useState(
+    () => sessionStorage.getItem("vs_entered") === "1" ||
+          /^#\/p\//.test(window.location.hash)
+  );
   const [showNew, setShowNew] = useState(false);
+  // A query staged from the home composer, handed to the Research view to run
+  // its clarification pause before launching.
+  const [pending, setPending] = useState<
+    { text: string; scope: "all" | "papers"; sinceYear: number } | null
+  >(null);
+  // Papers handed from the Map's multi-select into the Compare view.
+  const [comparePreset, setComparePreset] = useState<string[]>([]);
+  // Keep-alive: once a tab is visited it stays MOUNTED (hidden via CSS) so
+  // switching tabs never destroys its state — chat history, typed-but-unsent
+  // input, a running report's live polling, scroll, loaded results all persist.
+  // Reset when the project changes (different project = fresh views).
+  const [visited, setVisited] = useState<Set<View>>(() => new Set());
+  useEffect(() => {
+    if (selected && view !== "home") {
+      setVisited((prev) => (prev.has(view) ? prev : new Set(prev).add(view)));
+    }
+  }, [view, selected]);
+  useEffect(() => {
+    setVisited(new Set());
+  }, [selected?.id]);
 
   const refresh = useCallback(async () => {
     try {
       const list = await api.listProjects();
       setProjects(list);
-      setApiDown(false);
+      setApiState("ok");
       return list;
-    } catch {
+    } catch (err) {
       setProjects([]);
-      setApiDown(true);
+      // 401/403 = the API is fine, the session isn't. Anything else = unreachable.
+      const s = err instanceof ApiError ? err.status : 0;
+      setApiState(s === 401 || s === 403 ? "auth" : "down");
       return [];
     }
   }, []);
@@ -81,6 +185,15 @@ export default function App() {
     setRouteRestored(true);
   }, [projects, routeRestored]);
 
+  if (!entered)
+    return (
+      <Landing
+        onEnter={() => {
+          sessionStorage.setItem("vs_entered", "1");
+          setEntered(true);
+        }}
+      />
+    );
   if (authEnabled && !authed) return <Login />;
 
   function openProject(p: Project, v: View = "report") {
@@ -102,14 +215,20 @@ export default function App() {
     if (fresh) openProject(fresh, "documents");
   }
 
-  /** Home composer: research question in, project + run out. */
-  async function launchFromHome(query: string): Promise<void> {
+  /** Home composer: research question in → project created, then hand off to
+   * the Research view which runs the clarification pause BEFORE launching (so
+   * every run — even from the home box — actually stops to clarify). */
+  async function launchFromHome(
+    query: string, scope: "all" | "papers" = "all", sinceYear = 0
+  ): Promise<void> {
     const name = query.length > 60 ? query.slice(0, 57) + "…" : query;
     const created = await api.createProject(name, query);
-    await api.startPipeline(created.id, query);
     const list = await refresh();
-    const fresh = list.find((p) => p.id === created.id);
-    if (fresh) openProject(fresh, "runs");
+    const fresh = list.find((p) => p.id === created.id) ?? null;
+    if (fresh) {
+      setPending({ text: query, scope, sinceYear });
+      openProject(fresh, "runs");
+    }
   }
 
   function openReport(id: string) {
@@ -117,7 +236,58 @@ export default function App() {
     setView("report");
   }
 
-  const navDisabled = !selected;
+  // Render a single view. Kept as a function so the keep-alive container can
+  // mount each visited view once and toggle visibility, never unmounting.
+  function renderView(id: View) {
+    if (!selected) return null;
+    switch (id) {
+      case "runs":
+        return (
+          <RunsView projectId={selected.id} onOpenReport={openReport}
+                    initial={pending} onInitialConsumed={() => setPending(null)} />
+        );
+      case "report":
+        return <ReportView projectId={selected.id} reportId={reportId} />;
+      case "chat":
+        return <ChatView projectId={selected.id} />;
+      case "documents":
+        return <DocumentsView projectId={selected.id} />;
+      case "notebook":
+        return <NotebookView projectId={selected.id} />;
+      case "notes":
+        return <NotesView projectId={selected.id} />;
+      case "monitor":
+        return <MonitorView projectId={selected.id} />;
+      case "memory":
+        return <MemoryView projectId={selected.id} />;
+      case "compare":
+        return <CompareView projectId={selected.id} preselect={comparePreset} />;
+      case "metrics":
+        return <MetricsView projectId={selected.id} reportId={reportId} />;
+      case "about":
+        return <AboutView />;
+      case "map":
+        return (
+          <Suspense fallback={<div className="empty">Loading map…</div>}>
+            <MapView
+              projectId={selected.id}
+              onCompare={(ids) => {
+                setComparePreset(ids);
+                setView("compare");
+              }}
+            />
+          </Suspense>
+        );
+      default:
+        return null;
+    }
+  }
+
+  // Views to keep mounted: everything visited, plus the current one (so it
+  // renders on first paint before the "visited" effect runs).
+  const mounted = Array.from(new Set([...Array.from(visited), view])).filter(
+    (v) => v !== "home"
+  );
 
   return (
     <div className="shell">
@@ -140,9 +310,14 @@ export default function App() {
               {p.name}
             </button>
           ))}
-          {apiDown && (
+          {apiState === "auth" && (
+            <p style={{ padding: "6px 10px", fontSize: 12, color: "var(--warn)", lineHeight: 1.55 }}>
+              Sign-in required — your session is missing or expired.
+            </p>
+          )}
+          {apiState === "down" && (
             <p style={{ padding: "6px 10px", fontSize: 12, color: "var(--bad)", lineHeight: 1.55 }}>
-              API offline — start the backend on :8200.
+              Can’t reach the API — check that the backend is running.
             </p>
           )}
         </div>
@@ -178,48 +353,7 @@ export default function App() {
               <span className="crumb">/</span>
               <h2>{selected.name}</h2>
               <span className="spacer" />
-              <button
-                className={`steptab quiet ${view === "map" ? "active" : ""}`}
-                onClick={() => setView("map")}
-                title="Explore the corpus as a similarity map"
-                style={{ marginRight: 8 }}
-              >
-                ◬ Map
-              </button>
-              <button
-                className={`steptab quiet ${view === "monitor" ? "active" : ""}`}
-                onClick={() => setView("monitor")}
-                title="Standing watches for new papers on your questions"
-                style={{ marginRight: 8 }}
-              >
-                ◷ Monitor
-              </button>
-              <button
-                className={`steptab quiet ${view === "notes" ? "active" : ""}`}
-                onClick={() => setView("notes")}
-                title="Your own research notes & synthesis"
-                style={{ marginRight: 8 }}
-              >
-                ✎ Notes
-              </button>
-              <button
-                className={`steptab quiet ${view === "notebook" ? "active" : ""}`}
-                onClick={() => setView("notebook")}
-                title="Verbatim findings you've saved across reports"
-                style={{ marginRight: 8 }}
-              >
-                ★ Notebook
-              </button>
-              <button
-                className={`steptab quiet ${view === "documents" ? "active" : ""}`}
-                onClick={() => setView("documents")}
-                title="Source documents in this project"
-              >
-                ⌥ Sources
-                <span className="mono" style={{ opacity: 0.6, marginLeft: 6 }}>
-                  {selected.documents}
-                </span>
-              </button>
+              <ToolsMenu view={view} onPick={setView} docCount={selected.documents} />
               <div style={{ width: 1, height: 22, background: "var(--line)", margin: "0 12px" }} />
               <ProfileMenu />
             </div>
@@ -236,18 +370,19 @@ export default function App() {
               ))}
             </div>
             <div className="content">
-              {view === "runs" && (
-                <RunsView projectId={selected.id} onOpenReport={openReport} />
-              )}
-              {view === "report" && (
-                <ReportView projectId={selected.id} reportId={reportId} />
-              )}
-              {view === "chat" && <ChatView projectId={selected.id} />}
-              {view === "documents" && <DocumentsView projectId={selected.id} />}
-              {view === "notebook" && <NotebookView projectId={selected.id} />}
-              {view === "notes" && <NotesView projectId={selected.id} />}
-              {view === "monitor" && <MonitorView projectId={selected.id} />}
-              {view === "map" && <MapView projectId={selected.id} />}
+              <ResumeBanner
+                key={selected.id}
+                projectId={selected.id}
+                onResumeRun={() => setView("runs")}
+                onGo={(v) => setView(v)}
+              />
+              {/* Keep-alive: each visited view stays mounted; only visibility
+                  toggles, so ongoing work never resets on tab switch. */}
+              {mounted.map((id) => (
+                <div key={id} style={{ display: view === id ? undefined : "none" }}>
+                  {renderView(id)}
+                </div>
+              ))}
             </div>
           </>
         )}

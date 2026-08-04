@@ -1,0 +1,31 @@
+# ══════════════════════════════════════════════════════════════════════════
+# DEVELOPMENT overrides — auto-loaded by `docker compose` (by convention,
+# never used in production; deploy with an explicit
+# `docker compose -f docker-compose.yml ...`).
+#
+# Why this exists: a containerized worker running a baked image silently
+# executes STALE code after every edit. That invalidated three separate
+# verification runs before it was noticed. Bind-mounting the source means a
+# container restart (seconds) picks up changes — no image rebuild, no
+# 2GB Torch re-download, no stale-code class of bug.
+#
+#   Apply changes:  docker compose --profile app restart worker api
+# ══════════════════════════════════════════════════════════════════════════
+
+services:
+  api:
+    volumes:
+      # Live source. Dependencies stay in the image's site-packages; the
+      # editable install already points at /app.
+      - ./backend/app:/app/app:ro
+    environment:
+      LOG_FORMAT: console          # readable logs while developing
+
+  worker:
+    volumes:
+      - ./backend/app:/app/app:ro
+    environment:
+      LOG_FORMAT: console
+      # TEMPORARY (verification): small corpus for a fast, clean diagnostic run.
+      # Remove to restore the real 28-paper default.
+      RESEARCH_MAX_PAPERS: "10"

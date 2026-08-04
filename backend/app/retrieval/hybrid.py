@@ -36,6 +36,7 @@ class RetrievedChunk:
     abstract_only: bool = False
     source_type: str = ""
     citation_count: int = 0
+    year: int | None = None
 
 
 def _tokenize(text: str) -> list[str]:
@@ -61,10 +62,17 @@ async def retrieve(
     source_types: list[str] | None = None,
     document_ids: list[str] | None = None,
     max_per_doc: int | None = None,
+    published_after: int | None = None,
+    query_variants: list[str] | None = None,
+    hyde_text: str | None = None,
 ) -> list[RetrievedChunk]:
     """source_types restricts the evidence class (e.g. ["paper", "upload"]
     for scholarly evidence vs ["repo", "blog"] for practitioner signal) -
-    evidence classes are never mixed inside one drafting context."""
+    evidence classes are never mixed inside one drafting context.
+
+    published_after (a year) hard-filters to sources at least that recent -
+    the user's chosen time window. When unset, no filter is applied but the
+    recency prior still favors newer work (data-quality default)."""
     settings = get_settings()
     top_k = top_k or settings.retrieval_top_k
     fetch_n = max(top_k * 3, 30)
@@ -72,20 +80,24 @@ async def retrieve(
     # Corpus text from the system of record.
     stmt = (
         select(Chunk, Document.title, Document.abstract_only, Document.source_type,
-               Document.meta)
+               Document.meta, Document.year)
         .join(Document, Chunk.document_id == Document.id)
         .where(Chunk.project_id == project_id, Document.status == "indexed")
     )
     if source_types:
         stmt = stmt.where(Document.source_type.in_(source_types))
+    if published_after:
+        # Time window: only sources at/after the chosen year (undated sources
+        # are kept, never silently dropped - abstract_only labeling handles honesty).
+        stmt = stmt.where((Document.year >= published_after) | (Document.year.is_(None)))
     if document_ids:
         # Per-document scope ("Ask this paper"): retrieve only within these docs.
         stmt = stmt.where(Chunk.document_id.in_(document_ids))
     rows = (await session.execute(stmt)).all()
     if not rows:
         return []
-    by_id = {chunk.id: (chunk, title, abstract_only, source_type, meta or {})
-             for chunk, title, abstract_only, source_type, meta in rows}
+    by_id = {chunk.id: (chunk, title, abstract_only, source_type, meta or {}, year)
+             for chunk, title, abstract_only, source_type, meta, year in rows}
 
     # Lexical ranking (BM25 over the project corpus). Tokens include the
     # document title + section ('contextual retrieval'), so a chunk is
@@ -96,21 +108,31 @@ async def retrieve(
         for cid in ids
     ]
     bm25 = BM25Okapi(corpus_tokens)
-    lex_scores = bm25.get_scores(_tokenize(query))
-    lexical_ranked = [cid for _, cid in sorted(
-        zip(lex_scores, ids), key=lambda t: t[0], reverse=True)][:fetch_n]
 
-    # Dense ranking (Qdrant ANN, project-filtered). Source-type filtering is
-    # applied via by_id membership after fusion.
-    dense_ranked: list[str] = []
+    # Multi-query lexical ranking: each transformed variant produces its own
+    # BM25 ranking, all fused below. One phrasing missing the corpus's
+    # vocabulary no longer sinks retrieval.
+    lexical_rankings: list[list[str]] = []
+    for variant in (query_variants or [query]):
+        scores = bm25.get_scores(_tokenize(variant))
+        lexical_rankings.append([cid for _, cid in sorted(
+            zip(scores, ids), key=lambda t: t[0], reverse=True)][:fetch_n])
+
+    # Dense ranking (Qdrant ANN, project-filtered). We embed the query AND,
+    # when available, the HyDE passage - answer-shaped text matches
+    # answer-shaped chunks better than a question does.
+    dense_rankings: list[list[str]] = []
+    dense_inputs = [query] + ([hyde_text] if hyde_text else [])
     try:
-        qvec = (await embed_texts([query]))[0]
-        dense_ranked = [cid for cid, _ in await qdrant_search(qvec, project_id, limit=fetch_n * 2)
-                        if cid in by_id]
+        vecs = await embed_texts(dense_inputs)
+        for vec in vecs:
+            hits = await qdrant_search(vec, project_id, limit=fetch_n * 2)
+            dense_rankings.append([cid for cid, _ in hits if cid in by_id])
     except Exception:
         logger.exception("dense retrieval failed; degrading to lexical only")
 
-    fused = rrf_fuse([r for r in (dense_ranked, lexical_ranked) if r], k=settings.rrf_k)
+    fused = rrf_fuse([r for r in (*dense_rankings, *lexical_rankings) if r],
+                     k=settings.rrf_k)
     candidates = sorted(fused, key=fused.get, reverse=True)[: max(top_k * 2, 20)]
     candidates = [cid for cid in candidates if cid in by_id]
 
@@ -119,23 +141,38 @@ async def retrieve(
     # more-cited paper ranks higher. Weight kept small: relevance dominates,
     # citations only break near-ties (never override a clearly better match).
     import math
+    from datetime import datetime, timezone
+
+    _cur_year = datetime.now(timezone.utc).year
 
     def _cite_boost(cid: str) -> float:
         cc = by_id[cid][4].get("citation_count") or 0
         return math.log1p(cc)  # 0 for uncited, ~grows slowly with citations
 
+    def _recency_boost(cid: str) -> float:
+        """0..1: 1 for this year, decaying linearly to 0 at the horizon.
+        Undated sources get a neutral mid credit so they aren't buried."""
+        year = by_id[cid][5]
+        if not year:
+            return 0.4
+        age = max(0, _cur_year - int(year))
+        return max(0.0, 1.0 - age / max(1, settings.recency_horizon_years))
+
+    def _priors(cid: str) -> float:
+        return (settings.citation_weight * _cite_boost(cid)
+                + settings.recency_weight * _recency_boost(cid))
+
     if use_rerank and candidates:
         try:
             ce_scores = await rerank(query, [by_id[cid][0].text for cid in candidates])
-            blended = [(s + settings.citation_weight * _cite_boost(cid), cid)
-                       for s, cid in zip(ce_scores, candidates)]
+            blended = [(s + _priors(cid), cid) for s, cid in zip(ce_scores, candidates)]
             candidates = [cid for _, cid in sorted(blended, key=lambda t: t[0], reverse=True)]
         except Exception:
             logger.exception("rerank failed; using RRF order")
     elif candidates:
         candidates = sorted(
             candidates,
-            key=lambda cid: fused.get(cid, 0.0) + settings.citation_weight * 0.01 * _cite_boost(cid),
+            key=lambda cid: fused.get(cid, 0.0) + 0.01 * _priors(cid),
             reverse=True,
         )
 
@@ -157,7 +194,7 @@ async def retrieve(
 
     out: list[RetrievedChunk] = []
     for cid in candidates[:top_k]:
-        chunk, title, abstract_only, source_type, meta = by_id[cid]
+        chunk, title, abstract_only, source_type, meta, year = by_id[cid]
         out.append(RetrievedChunk(
             chunk_id=chunk.id, document_id=chunk.document_id,
             document_title=title or "", section=chunk.section,
@@ -166,5 +203,6 @@ async def retrieve(
             abstract_only=bool(abstract_only),
             source_type=source_type or "",
             citation_count=int(meta.get("citation_count") or 0),
+            year=int(year) if year else None,
         ))
     return out

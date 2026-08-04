@@ -13,12 +13,19 @@ WORKDIR /app
 # lean BM25-only image.
 ARG INSTALL_ML=1
 
-# Install dependencies first for better layer caching.
+# Dependencies FIRST, source LAST — otherwise every code change invalidates the
+# install layer and re-downloads ~2GB of Torch. We install against a stub
+# package so the editable install resolves, then copy the real source over it.
 COPY pyproject.toml ./
+RUN mkdir -p app && touch app/__init__.py
+# INSTALL_ML toggles the heavy ML stack; OTel is always included so the
+# observability profile produces traces out of the box (no-op unless enabled).
+RUN pip install --upgrade pip \
+    && if [ "$INSTALL_ML" = "1" ]; then pip install -e ".[ml,otel]"; else pip install -e ".[otel]"; fi
+
+# Source changes now rebuild only these cheap layers.
 COPY app ./app
 COPY evals ./evals
-RUN pip install --upgrade pip \
-    && if [ "$INSTALL_ML" = "1" ]; then pip install -e ".[ml]"; else pip install -e .; fi
 
 EXPOSE 8000
 

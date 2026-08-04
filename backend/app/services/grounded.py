@@ -109,6 +109,11 @@ async def _intent_ok(question: str) -> tuple[bool, str]:
 async def _technical_context(
     session: AsyncSession, project_id: str, question: str
 ) -> list[TechnicalHit]:
+    # TODO(practitioner-sources): repo/blog context is disabled while the
+    # practitioner agents are off — the corpus has no such documents anyway.
+    from app.core.config import get_settings
+    if not get_settings().practitioner_sources_enabled:
+        return []
     hits = await retrieve(session, project_id, question, top_k=4,
                           source_types=_PRACTITIONER)
     return [TechnicalHit(h.document_id, h.document_title, h.source_type,
@@ -119,6 +124,13 @@ async def grounded_chat(
     session: AsyncSession, project_id: str, question: str,
     *, document_ids: list[str] | None = None,
 ) -> ChatResult:
+    # Stage 9.3 - mask identifiers before the question reaches a third-party
+    # LLM or the logs. Source text is deliberately NOT masked (see core/pii.py).
+    from app.core.pii import find_pii, mask_pii
+    kinds = find_pii(question)
+    if kinds:
+        logger.info("masked pii in question", extra={"kinds": kinds})
+        question = mask_pii(question)
     # Scoped mode ("Ask this paper"): retrieve only within the given document(s),
     # any source type, and skip the separate practitioner-context panel.
     if document_ids:
@@ -140,8 +152,15 @@ async def grounded_chat(
         # are retrieved separately and presented as clearly-labeled context.
         # Broader top_k + a per-document cap so corpus-wide questions span
         # many papers instead of clustering on one.
+        # Stage 2 - transform the query before retrieving. The chat path used
+        # to search the raw question, which is question-shaped text matched
+        # against answer-shaped chunks; rewrite + expansions + HyDE fix that.
+        from app.retrieval.query_transform import transform_query
+        tq = await transform_query(question)
         chunks = await retrieve(session, project_id, question, source_types=_SCHOLARLY,
-                                top_k=16, max_per_doc=2)
+                                top_k=16, max_per_doc=2,
+                                query_variants=tq.variants,
+                                hyde_text=tq.hypothetical or None)
         technical = await _technical_context(session, project_id, question)
 
     if not chunks:
@@ -156,7 +175,7 @@ async def grounded_chat(
 
     result = await complete_json(
         "chat",
-        f"Question: {question}\n\nSOURCES:\n{_format_sources(chunks)}",
+        f"Question: {question}\n\nSOURCES:\n{_format_sources(chunks, question)}",
         ChatAnswer, system=_CHAT_SYSTEM,
     )
 

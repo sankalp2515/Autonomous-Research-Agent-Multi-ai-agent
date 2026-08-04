@@ -153,6 +153,64 @@ function Prose({
   );
 }
 
+// Adaptive comparison table. The backend chose this layout for the section and
+// assigned each VERIFIED claim (by index) to a cell — so every cell is still
+// quote-checked and click-to-source, exactly like the prose citations.
+function ClaimTable({
+  section,
+  claimRef,
+  onCite,
+}: {
+  section: Report["sections"][0];
+  claimRef: Map<string, number>;
+  onCite: (id: string) => void;
+}) {
+  const layout = section.layout!;
+  const claims = section.claims;
+  const cell = (idxs: number[] | undefined) => {
+    if (!idxs?.length) return <span className="rp-td-empty">—</span>;
+    return idxs.map((i) => {
+      const c = claims[i];
+      if (!c) return null;
+      const ev = c.evidence[0];
+      const strong = ev?.nli_label === "entailment" && (ev?.nli_score ?? 0) >= 0.8;
+      const cls = ev?.nli_label === "contradiction" ? "moderate" : strong ? "strong" : "moderate";
+      return (
+        <span key={c.claim_id} className="rp-td-claim">
+          {c.text.trim()}{" "}
+          <sup className={`rp-cite ${cls}`} onClick={() => onCite(c.claim_id)}
+               title="click to see the exact quote">
+            {claimRef.get(c.claim_id)}
+          </sup>{" "}
+        </span>
+      );
+    });
+  };
+  return (
+    <div className="rp-table-wrap">
+      <table className="rp-table">
+        <thead>
+          <tr>
+            <th />
+            {layout.columns.map((col) => <th key={col}>{col}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {layout.rows.map((row, ri) => (
+            <tr key={ri}>
+              <th scope="row">{row.label}</th>
+              {layout.columns.map((col) => (
+                <td key={col}>{cell(row.cells[col])}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="rp-table-note">Every cell is a quote-verified claim — click any ¹ for its source.</p>
+    </div>
+  );
+}
+
 export default function ReportView({
   projectId,
   reportId,
@@ -240,6 +298,25 @@ export default function ReportView({
   const findings = scholarlySections.filter((s) => s.status !== "gap" && s.claims.length);
   const readMins = Math.max(1, Math.round(refs.length * 0.6));
   const onScholarly = tab === "scholarly";
+  // Transparency: the actual time period the cited sources span, so the
+  // recency claim is verifiable, not a promise.
+  const years = report.references.map((r) => r.year).filter((y): y is number => !!y);
+  const recentCutoff = new Date().getFullYear() - 4;
+  const yearSpan = years.length
+    ? {
+        min: Math.min(...years),
+        max: Math.max(...years),
+        recent: years.filter((y) => y >= recentCutoff).length,
+        total: years.length,
+      }
+    : null;
+  // References are numbered in citation order (so superscripts match). Show
+  // each tab only its own evidence class — practitioner sources must not
+  // appear in the scholarly reference list.
+  const isPractitioner = (t: string) => t === "repo" || t === "blog";
+  const shownRefs = onScholarly
+    ? refs.filter((r) => !isPractitioner(r.type))
+    : refs.filter((r) => isPractitioner(r.type));
 
   return (
     <div className="rp">
@@ -261,7 +338,15 @@ export default function ReportView({
             {conf.sections_verified}/{conf.sections_total} sections grounded
           </span>
           <span className="rp-pill">{refs.length} sources</span>
-          <span className="rp-pill">{conf.llm_calls ?? 0} model calls</span>
+          {yearSpan && (
+            <span
+              className="rp-pill"
+              title={`Ranking is recency-weighted, but relevance still wins — older foundational work can rank high. ${yearSpan.recent} of ${yearSpan.total} dated sources are from ${recentCutoff} or later.`}
+            >
+              sources {yearSpan.min === yearSpan.max ? yearSpan.min : `${yearSpan.min}–${yearSpan.max}`}
+              {" · "}{yearSpan.recent}/{yearSpan.total} since {recentCutoff}
+            </span>
+          )}
           <span className="rp-pill">~{readMins} min read</span>
           <span className="rp-meta-note">Every sentence is quote-verified · click any ¹ to see the source</span>
         </div>
@@ -349,6 +434,8 @@ export default function ReportView({
                 <strong>Evidence gap.</strong>{" "}
                 {section.gap_note || "The corpus could not support verifiable claims here."}
               </div>
+            ) : section.layout?.kind === "table" && section.layout.rows?.length ? (
+              <ClaimTable section={section} claimRef={claimRef} onCite={setOpenClaim} />
             ) : (
               <Prose claims={section.claims} claimRef={claimRef} onCite={setOpenClaim} />
             )}
@@ -356,12 +443,16 @@ export default function ReportView({
         );
       })}
 
-      {onScholarly && refs.length > 0 && (
+      {shownRefs.length > 0 && (
         <section className="rp-refs">
           <h2>References</h2>
-          <p className="rp-refs-note">Every reference resolved against the corpus — fabricated citations are structurally impossible.</p>
+          <p className="rp-refs-note">
+            {onScholarly
+              ? "Scholarly sources only — practitioner references are listed under their own tab. Every reference resolved against the corpus, so fabricated citations are structurally impossible."
+              : "Practitioner sources — not peer-reviewed, listed separately from the scholarly references."}
+          </p>
           <ol>
-            {refs.map((r) => (
+            {shownRefs.map((r) => (
               <li key={r.n} id={`ref-${r.n}`}>
                 <span className="rp-ref-num">{r.n}</span>
                 <span className="rp-ref-body">

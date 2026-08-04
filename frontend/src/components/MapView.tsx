@@ -46,12 +46,44 @@ function layout(data: MapData): Map<string, Pt> {
   return pos;
 }
 
-export default function MapView({ projectId }: { projectId: string }) {
+export default function MapView({
+  projectId,
+  onCompare,
+}: {
+  projectId: string;
+  onCompare?: (documentIds: string[]) => void;
+}) {
   const [data, setData] = useState<MapData | null>(null);
   const [pos, setPos] = useState<Map<string, Pt>>(new Map());
   const [sel, setSel] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [asking, setAsking] = useState<MapNode | null>(null);
+  // Multi-select for cross-paper comparison: the map is the visual entry point
+  // to the Compare view — pick nodes here, compare them there.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+
+  function togglePick(id: string) {
+    setPicked((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else if (n.size < 5) n.add(id);
+      return n;
+    });
+  }
+
+  function pickNeighbors() {
+    if (!sel || !data) return;
+    setPicked((s) => {
+      const n = new Set(s);
+      n.add(sel);
+      for (const e of data.edges) {
+        if (n.size >= 5) break;
+        if (e.src === sel) n.add(e.dst);
+        else if (e.dst === sel) n.add(e.src);
+      }
+      return n;
+    });
+  }
   const [t, setT] = useState({ tx: 0, ty: 0, k: 1 });
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<{ kind: "pan" | "node"; id?: string; sx: number; sy: number; otx: number; oty: number } | null>(null);
@@ -183,6 +215,10 @@ export default function MapView({ projectId }: { projectId: string }) {
                 <g key={n.id} style={{ cursor: "pointer", opacity: dim ? 0.28 : 1 }}
                    onMouseDown={(e) => onDown(e, n.id)}
                    onMouseEnter={() => setHover(n.id)} onMouseLeave={() => setHover(null)}>
+                  {picked.has(n.id) && (
+                    <circle cx={p.x} cy={p.y} r={r(n) + 4 / t.k} fill="none"
+                            stroke="var(--primary)" strokeWidth={2 / t.k} />
+                  )}
                   <circle cx={p.x} cy={p.y} r={r(n)}
                           fill={isSel ? "var(--primary)" : neighbors.has(n.id) ? "var(--primary-deep)" : "var(--text-2)"}
                           stroke="#fff" strokeWidth={1.5 / t.k} />
@@ -210,8 +246,17 @@ export default function MapView({ projectId }: { projectId: string }) {
             </p>
             <p className="map-panel-near">{neighbors.size} closely-related paper{neighbors.size === 1 ? "" : "s"} highlighted</p>
             <div className="map-panel-actions">
+              <button className={`btn ${picked.has(selNode.id) ? "" : "btn-ghost"}`} style={{ fontSize: 12.5 }}
+                      onClick={() => togglePick(selNode.id)}>
+                {picked.has(selNode.id) ? "✓ In comparison" : "⊞ Add to compare"}
+              </button>
+              {neighbors.size > 0 && (
+                <button className="btn btn-ghost" style={{ fontSize: 12.5 }} onClick={pickNeighbors}>
+                  ✦ Add neighbours
+                </button>
+              )}
               {!selNode.abstract_only && (
-                <button className="btn" style={{ fontSize: 12.5 }} onClick={() => setAsking(selNode)}>Ask this paper</button>
+                <button className="btn btn-ghost" style={{ fontSize: 12.5 }} onClick={() => setAsking(selNode)}>Ask this paper</button>
               )}
               {selNode.url && (
                 <a className="btn btn-ghost" style={{ fontSize: 12.5 }} href={selNode.url} target="_blank" rel="noreferrer">Open ↗</a>
@@ -220,6 +265,22 @@ export default function MapView({ projectId }: { projectId: string }) {
           </aside>
         )}
       </div>
+
+      {picked.size > 0 && (
+        <div className="map-tray">
+          <span className="map-tray-count mono">{picked.size} selected</span>
+          <span className="map-tray-hint">for comparison</span>
+          <span style={{ flex: 1 }} />
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => setPicked(new Set())}>
+            Clear
+          </button>
+          <button className="btn" style={{ fontSize: 12 }}
+                  disabled={picked.size < 2 || !onCompare}
+                  onClick={() => onCompare?.([...picked])}>
+            ⊞ Compare {picked.size} papers →
+          </button>
+        </div>
+      )}
 
       {asking && (
         <>

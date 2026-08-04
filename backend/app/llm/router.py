@@ -50,8 +50,13 @@ ROUTING: dict[str, list[str]] = {
     "clarify":         ["groq", "gemini", "openrouter"],
     "clarify_refine":  ["groq", "gemini", "openrouter"],
     "query_expansion": ["groq", "gemini", "openrouter"],
+    # Query rewrite + expansion + HyDE in one call; latency-sensitive (it sits
+    # in front of every retrieval), so the fastest provider leads.
+    "query_transform": ["groq", "gemini", "openrouter"],
     "screening":       ["gemini", "groq", "openrouter"],
+    "next_questions":  ["groq", "gemini", "openrouter"],
     # Mid complexity: structure quality matters.
+    "structure":       ["gemini", "groq", "openrouter"],
     "outline":         ["gemini", "groq", "deepseek", "openrouter"],
     "judge":           ["gemini", "groq", "deepseek"],
     # High complexity: reasoning quality wins; verification gate backstops all.

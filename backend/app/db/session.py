@@ -25,8 +25,8 @@ def get_engine():
         settings = get_settings()
         _engine = create_async_engine(
             settings.database_url,
-            pool_size=10,
-            max_overflow=20,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
             pool_pre_ping=True,
             echo=False,
         )
@@ -50,6 +50,7 @@ async def init_db(*, attempts: int = 10, delay: float = 2.0) -> None:
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                await _ensure_indexes(conn)
             logger.info("database schema ensured")
             return
         except Exception as exc:  # connection refused, DB starting, etc.
@@ -61,6 +62,34 @@ async def init_db(*, attempts: int = 10, delay: float = 2.0) -> None:
     raise RuntimeError(
         f"database unreachable after {attempts} attempts: {str(last_exc)[:200]}"
     )
+
+
+# Hot-path composite indexes. `create_all` adds indexes only for tables it
+# creates fresh, so we apply these idempotently (CREATE INDEX IF NOT EXISTS)
+# on every boot — covering pre-existing databases too. Cheap: a no-op once
+# present. Graduates to Alembic when the schema stabilizes.
+_HOT_INDEXES = (
+    # runs list: filtered by project, ordered by recency.
+    'CREATE INDEX IF NOT EXISTS ix_runs_project_created '
+    'ON runs (project_id, created_at DESC)',
+    # monitor alerts: filtered by project + status, ranked by score.
+    'CREATE INDEX IF NOT EXISTS ix_alerts_project_status_score '
+    'ON monitor_alerts (project_id, status, score DESC)',
+    # report claim fan-in: report load batches on report_id.
+    'CREATE INDEX IF NOT EXISTS ix_claims_report ON claims (report_id)',
+)
+
+
+async def _ensure_indexes(conn) -> None:
+    from sqlalchemy import text
+    dialect = conn.dialect.name
+    if dialect != "postgresql":
+        return  # IF NOT EXISTS index syntax is Postgres-specific; skip elsewhere (tests use sqlite)
+    for stmt in _HOT_INDEXES:
+        try:
+            await conn.execute(text(stmt))
+        except Exception as exc:  # never let an index failure block startup
+            logger.warning("index ensure skipped", extra={"error": str(exc)[:160]})
 
 
 @asynccontextmanager

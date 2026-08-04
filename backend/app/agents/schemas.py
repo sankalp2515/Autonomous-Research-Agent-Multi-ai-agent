@@ -83,3 +83,57 @@ class ChatAnswer(BaseModel):
     refuse: bool = Field(default=False,
                          description="true if the corpus does not cover the question")
     refusal_reason: str = ""
+
+
+# ── Adaptive presentation (Elicit-style) ─────────────────────────────────
+# A section's verified claims can be reorganized into a comparison table when
+# they compare several entities along shared attributes. This is a pure
+# REORGANIZATION of already-verified claims (by index), never new prose — so
+# every table cell remains gate-verified and click-to-source.
+
+class TableRow(BaseModel):
+    label: str = Field(description="the entity this row compares, e.g. a method or model name")
+    cells: dict[str, list[int]] = Field(
+        default_factory=dict,
+        description="column header -> indices of the verified findings that belong in that cell",
+    )
+
+
+class SectionPresentation(BaseModel):
+    kind: str = Field(
+        description="'table' ONLY if the findings compare 3+ distinct entities "
+        "across shared attributes; otherwise 'prose'"
+    )
+    columns: list[str] = Field(
+        default_factory=list, max_length=4,
+        description="attribute column headers, e.g. ['What it is','Why it helps','Limitation']",
+    )
+    rows: list[TableRow] = Field(default_factory=list, max_length=8)
+
+
+class QueryTransform(BaseModel):
+    """Stage-2 query transformation, produced in a SINGLE call (three separate
+    calls would triple free-tier spend for the same information)."""
+    rewritten: str = Field(
+        description="the question rewritten as a precise, self-contained "
+        "retrieval query using the terminology a paper would use"
+    )
+    expansions: list[str] = Field(
+        default_factory=list, max_length=3,
+        description="2-3 alternative phrasings using synonyms/related terms, "
+        "each a standalone query covering a different angle",
+    )
+    hypothetical: str = Field(
+        default="",
+        description="HyDE: a short, plausible ANSWER passage (2-4 sentences) as "
+        "it might appear in a paper. Never presented to the user - embedded "
+        "only, so retrieval matches answer-shaped text instead of question-shaped text.",
+    )
+
+
+class NextQuestions(BaseModel):
+    questions: list[str] = Field(
+        default_factory=list, max_length=4,
+        description="2-4 specific, distinct follow-up research questions a "
+        "researcher would naturally pursue next",
+    )

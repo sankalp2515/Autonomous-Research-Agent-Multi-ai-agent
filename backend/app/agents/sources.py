@@ -80,11 +80,18 @@ def _xml_field(blob: str, tag: str) -> str:
 
 
 async def search_arxiv(query: str, max_results: int = 15,
-                       sort_by: str = "relevance") -> list[PaperHit]:
+                       sort_by: str = "relevance",
+                       since_year: int | None = None) -> list[PaperHit]:
+    # Apply the time window at SEARCH time, not just at retrieval: every paper
+    # we fetch costs a PDF download + parse + embed (~30-45s each), so filtering
+    # after ingest burns minutes on documents we then discard.
+    search_query = f"all:{query}"
+    if since_year:
+        search_query += f" AND submittedDate:[{since_year}01010000 TO 999912312359]"
     try:
         resp = await _get(
             "https://export.arxiv.org/api/query",
-            params={"search_query": f"all:{query}", "max_results": max_results,
+            params={"search_query": search_query, "max_results": max_results,
                     "sortBy": sort_by, "sortOrder": "descending"},
         )
     except httpx.HTTPError:
@@ -108,17 +115,23 @@ async def search_arxiv(query: str, max_results: int = 15,
 
 # ── Semantic Scholar ─────────────────────────────────────────────────────
 
-async def search_semantic_scholar(query: str, max_results: int = 15) -> list[PaperHit]:
+async def search_semantic_scholar(query: str, max_results: int = 15,
+                                  since_year: int | None = None) -> list[PaperHit]:
     settings = get_settings()
     headers = {}
     if settings.semantic_scholar_api_key:
         headers["x-api-key"] = settings.semantic_scholar_api_key
+    params: dict = {
+        "query": query, "limit": max_results,
+        "fields": "title,abstract,year,authors,externalIds,openAccessPdf,url,"
+                  "citationCount,venue",
+    }
+    if since_year:
+        params["year"] = f"{since_year}-"   # S2 open-ended range, e.g. "2021-"
     try:
         resp = await _get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
-            params={"query": query, "limit": max_results,
-                    "fields": "title,abstract,year,authors,externalIds,openAccessPdf,url,"
-                              "citationCount,venue"},
+            params=params,
             headers=headers,
         )
     except httpx.HTTPError:
@@ -166,7 +179,43 @@ async def fetch_references(s2_id: str, max_refs: int = 80) -> list[dict]:
     return out
 
 
+def _is_safe_public_url(url: str) -> bool:
+    """SSRF guard: only http(s) to a host that resolves to public IPs. Blocks
+    fetches to loopback / private / link-local / reserved ranges (e.g. the
+    cloud metadata endpoint 169.254.169.254) even when the URL comes from an
+    external record we don't fully trust."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(parts.hostname, parts.port or 443)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
 async def download_pdf(url: str, *, max_mb: int = 50) -> bytes | None:
+    # SSRF check before dialing out. (Residual: a redirect to a private host is
+    # still followed by httpx; production should also pin an egress allowlist /
+    # disable auto-redirect for untrusted fetches.)
+    if not await asyncio.to_thread(_is_safe_public_url, url):
+        logger.warning("blocked non-public PDF url", extra={"url": url[:120]})
+        return None
     try:
         resp = await _get(url)
     except httpx.HTTPError:

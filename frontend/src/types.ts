@@ -118,12 +118,19 @@ export interface EvidenceDetail {
   }[];
 }
 
+export interface SectionLayout {
+  kind: string; // "table"
+  columns: string[];
+  rows: { label: string; cells: Record<string, number[]> }[];
+}
+
 export interface ReportSection {
   heading: string;
   sub_question: string;
   status: string;
   gap_note: string;
   track?: string; // academic | technical
+  layout?: SectionLayout | null; // optional comparison table over verified claims
   claims: EvidenceDetail[];
 }
 
@@ -233,6 +240,101 @@ export interface RefindHit {
   snippet: string;
   score: number;
   abstract_only: boolean;
+}
+
+export interface CompareCell {
+  claim: string;
+  quote: string;
+  chunk_id: string;
+  claim_id: string;
+  page: number;
+  verified: boolean;
+}
+
+export interface Comparison {
+  id: string;
+  title: string;
+  dimensions: string[];
+  include_in_report: boolean;
+  created_at: string;
+  documents: { id: string; title: string; year: number | null; url: string }[];
+  matrix: { dimension: string; cells: Record<string, CompareCell | null> }[];
+}
+
+export interface ComparisonSummary {
+  id: string;
+  title: string;
+  dimensions: string[];
+  document_count: number;
+  include_in_report: boolean;
+  created_at: string;
+}
+
+export interface Recommendation {
+  id: string;
+  title: string;
+  year: number | null;
+  authors: string[];
+  url: string;
+  citations: number;
+  score: number;
+}
+
+export interface ResumeData {
+  project_id: string;
+  doc_count: number;
+  comparison_count: number;
+  new_alerts: number;
+  unfinished_runs: {
+    run_id: string;
+    query: string;
+    status: string;
+    current_node: string;
+    resumable: boolean;
+    created_at: string;
+  }[];
+  last_activity: string;
+  last_activity_at: string;
+  open_gaps: string[];
+  latest_report_id: string | null;
+  suggestions: { kind: string; label: string; run_id?: string }[];
+}
+
+export interface MetricValue {
+  value: number | null;
+  unit: "ratio" | "seconds";
+  definition: string;
+  available: boolean;
+  per_node?: Record<string, number>;
+  llm_calls?: number;
+}
+
+export interface ReportMetrics {
+  report_id: string;
+  report_title: string;
+  claims_total: number;
+  sections_verified: number;
+  sections_total: number;
+  ml_available: boolean;
+  metrics: {
+    citation_accuracy: MetricValue;
+    faithfulness: MetricValue;
+    answer_relevance: MetricValue;
+    context_precision: MetricValue;
+    context_recall: MetricValue;
+    latency: MetricValue;
+  };
+  trace: {
+    claim_id: string;
+    text: string;
+    section: string;
+    quote: string;
+    quote_ok: boolean;
+    nli_label: string;
+    nli_score: number;
+    doc_title: string;
+    page: number;
+  }[];
 }
 
 export interface GraphData {

@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Scrapes the API's /metrics (custom LLM / gate / pipeline series live here).
+  # This stack is a SEPARATE compose project, so it reaches the API over the
+  # host, not a shared docker network. 8210 is the host-mapped API port.
+  # If METRICS_TOKEN is set, add a bearer_token / bearer_token_file here.
+  - job_name: veriscope-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8210"]
+        labels:
+          service: veriscope-api
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -2,16 +2,19 @@
 /api/chat /api/graph) plus workspace endpoints (projects, documents,
 refind, claim evidence)."""
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
-from app.core.exceptions import NotFoundError, ValidationFailed
+from app.core.config import get_settings
+from app.core.exceptions import (
+    ConflictError, NotFoundError, ServiceBusyError, ValidationFailed,
+)
 from app.db.models import (
-    Chunk, Citation, Claim, ClaimEvidence, Document, GraphEdge, MonitorAlert,
-    Note, Project, Report, Run, SavedClaim, Watch,
+    Chunk, Citation, Claim, ClaimEvidence, Comparison, Document, GraphEdge,
+    Memory, MonitorAlert, Note, Project, Report, Run, SavedClaim, Watch,
 )
 from app.db.session import get_session
 from app.ingestion.pipeline import ingest_pdf_document
@@ -35,18 +38,21 @@ async def list_projects(
     rows = (await session.scalars(
         select(Project).where(Project.owner_id == user).order_by(Project.created_at.desc())
     )).all()
-    out = []
-    for p in rows:
-        doc_count = await session.scalar(
-            select(func.count(Document.id)).where(Document.project_id == p.id)
-        )
-        run_count = await session.scalar(
-            select(func.count(Run.id)).where(Run.project_id == p.id)
-        )
-        out.append({"id": p.id, "name": p.name, "description": p.description,
-                    "documents": doc_count, "runs": run_count,
-                    "created_at": p.created_at.isoformat()})
-    return out
+    if not rows:
+        return []
+    # Two grouped aggregates instead of 2 counts per project (was 2N+1 queries).
+    ids = [p.id for p in rows]
+    doc_counts = dict((await session.execute(
+        select(Document.project_id, func.count(Document.id))
+        .where(Document.project_id.in_(ids)).group_by(Document.project_id)
+    )).all())
+    run_counts = dict((await session.execute(
+        select(Run.project_id, func.count(Run.id))
+        .where(Run.project_id.in_(ids)).group_by(Run.project_id)
+    )).all())
+    return [{"id": p.id, "name": p.name, "description": p.description,
+             "documents": doc_counts.get(p.id, 0), "runs": run_counts.get(p.id, 0),
+             "created_at": p.created_at.isoformat()} for p in rows]
 
 
 @router.post("/projects", status_code=201)
@@ -98,7 +104,15 @@ async def upload_document(
     await _get_project(session, project_id, user)
     if not (file.filename or "").lower().endswith(".pdf"):
         raise ValidationFailed("only PDF uploads are supported here")
-    pdf_bytes = await file.read()
+    # Bounded read: cap BEFORE buffering the whole file, so a multi-GB upload
+    # can't exhaust memory ahead of the parser's size check. read(n) yields at
+    # most n bytes; reading cap+1 lets us detect an over-limit file cheaply.
+    max_bytes = get_settings().ingest_max_pdf_mb * 1024 * 1024
+    pdf_bytes = await file.read(max_bytes + 1)
+    if len(pdf_bytes) > max_bytes:
+        raise ValidationFailed(f"PDF exceeds {get_settings().ingest_max_pdf_mb}MB limit")
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValidationFailed("file is not a valid PDF")
     doc = await ingest_pdf_document(
         session, project_id=project_id, pdf_bytes=pdf_bytes,
         source_type="upload", title=title or (file.filename or "untitled"),
@@ -132,7 +146,12 @@ async def import_bibtex(
     first); others become labeled abstract-only stubs. Runs as a job."""
     await _get_project(session, project_id, user)
     from app.ingestion.bibtex import parse_bibtex
-    text = (await file.read()).decode("utf-8", "ignore")
+    # .bib files are small; cap the read so a huge upload can't exhaust memory.
+    _BIB_MAX = 5 * 1024 * 1024
+    raw = await file.read(_BIB_MAX + 1)
+    if len(raw) > _BIB_MAX:
+        raise ValidationFailed("BibTeX file too large (5MB limit)")
+    text = raw.decode("utf-8", "ignore")
     entries = parse_bibtex(text)[:50]
     if not entries:
         raise ValidationFailed("no BibTeX entries found in file")
@@ -148,6 +167,8 @@ async def import_bibtex(
 class PipelineStart(BaseModel):
     project_id: str
     query: str = Field(min_length=8, max_length=2000)
+    scope: str = Field(default="all", pattern="^(all|papers)$")
+    since_year: int = Field(default=0, ge=0, le=2100)  # 0 = any time (recency still prioritized)
 
 
 @router.post("/pipeline", status_code=202)
@@ -156,10 +177,39 @@ async def start_pipeline(
     session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
 ):
     await _get_project(session, body.project_id, user)
+    settings = get_settings()
+
+    # Backpressure #1 — global load shed: if the queue is saturated, refuse new
+    # work with a retryable 503 instead of letting it pile onto a busy worker.
+    depth = await redis_store.queue_depth()
+    if depth >= settings.max_queue_depth:
+        raise ServiceBusyError(
+            "The research queue is at capacity right now — please retry shortly.",
+            detail={"queue_depth": depth},
+        )
+
+    # Backpressure #2 — per-project admission cap: bound concurrent runs so one
+    # project can't monopolize the worker pool.
+    active = await session.scalar(
+        select(func.count(Run.id)).where(
+            Run.project_id == body.project_id,
+            Run.status.in_(["queued", "running"]),
+        )
+    )
+    if (active or 0) >= settings.max_concurrent_runs_per_project:
+        raise ConflictError(
+            f"This project already has {active} run(s) in progress "
+            f"(limit {settings.max_concurrent_runs_per_project}). "
+            "Wait for one to finish before starting another."
+        )
+
     run = Run(project_id=body.project_id, query=body.query)
     session.add(run)
     await session.flush()
-    await redis_store.enqueue_job("run_pipeline", {"run_id": run.id})
+    await redis_store.enqueue_job(
+        "run_pipeline",
+        {"run_id": run.id, "scope": body.scope, "since_year": body.since_year},
+    )
     return {"run_id": run.id, "status": "queued"}
 
 
@@ -185,32 +235,60 @@ _TERMINAL = {"completed", "completed_with_gaps", "failed", "rejected", "budget_e
 @router.get("/status/{run_id}/stream")
 async def run_status_stream(
     run_id: str,
-    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+    user: str = Depends(current_user),
 ):
     """Server-Sent Events stream of live run progress — pushes each new
-    progress update instead of the client polling. Ends on a terminal state."""
-    import asyncio
+    progress update instead of the client polling. Ends on a terminal state.
+
+    Access is verified with a short-lived session that is released immediately;
+    the (up to 15-minute) stream itself touches only Redis, so it never pins a
+    pooled DB connection for its lifetime — that would exhaust the pool as soon
+    as a handful of viewers watch runs concurrently."""
     import json as _json
 
     from fastapi.responses import StreamingResponse
 
-    run = await session.get(Run, run_id)
-    if run is None:
-        raise NotFoundError("run not found")
-    await _get_project(session, run.project_id, user)
+    from app.db.session import session_scope
+
+    async with session_scope() as session:
+        run = await session.get(Run, run_id)
+        if run is None:
+            raise NotFoundError("run not found")
+        await _get_project(session, run.project_id, user)
 
     async def gen():
+        import time as _time
+
+        def _is_terminal(p) -> bool:
+            s = (p or {}).get("status") or (p or {}).get("node")
+            return s in _TERMINAL
+
         last = None
-        for _ in range(900):  # safety cap ~15 min
-            prog = await redis_store.read_progress(run_id)
+        deadline = _time.monotonic() + 900  # hard 15-min ceiling per connection
+
+        # Snapshot first — catch anything published before we subscribed.
+        snap = await redis_store.read_progress(run_id)
+        if snap:
+            last = snap
+            yield f"data: {_json.dumps(snap)}\n\n"
+            if _is_terminal(snap):
+                yield "event: done\ndata: {}\n\n"
+                return
+
+        # Then event-driven: wake on publish, not on a 1s clock. The idle ticks
+        # (None) let us re-read the snapshot as a backstop for missed messages.
+        async for msg in redis_store.subscribe_progress(run_id):
+            if _time.monotonic() > deadline:
+                break
+            prog = msg
+            if prog is None:  # idle tick
+                prog = await redis_store.read_progress(run_id)
             if prog and prog != last:
                 last = prog
                 yield f"data: {_json.dumps(prog)}\n\n"
-            status = (prog or {}).get("status") or (prog or {}).get("node")
-            if status in _TERMINAL:
+            if _is_terminal(prog):
                 yield "event: done\ndata: {}\n\n"
                 return
-            await asyncio.sleep(1.0)
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream",
@@ -239,21 +317,70 @@ async def run_status(
 
 @router.get("/report/{report_id}")
 async def get_report(
-    report_id: str,
+    report_id: str, response: Response,
     session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
 ):
     report = await session.get(Report, report_id)
     if report is None:
         raise NotFoundError("report not found")
     await _get_project(session, report.project_id, user)
+    # A report's body is immutable once assembled; only its project-wide
+    # reference list can grow. A short private cache avoids re-fetching the
+    # (query-heavy) report on every in-session navigation without risking
+    # more than ~a minute of reference staleness.
+    response.headers["Cache-Control"] = "private, max-age=60"
+
+    # Batch-load every claim + evidence + chunk + document the report needs in a
+    # handful of queries. The previous per-claim path was an N+1 fan-out: a
+    # 6-section × 5-claim report issued ~120 sequential round trips just to
+    # render. Here it is 4, regardless of report size.
+    all_claim_ids = [cid for s in report.sections for cid in s.get("claim_ids", [])]
+    claims_by_id: dict[str, Claim] = {}
+    ev_by_claim: dict[str, list[ClaimEvidence]] = {}
+    chunks_by_id: dict[str, Chunk] = {}
+    docs_by_id: dict[str, Document] = {}
+    if all_claim_ids:
+        claims_by_id = {c.id: c for c in (await session.scalars(
+            select(Claim).where(Claim.id.in_(all_claim_ids)))).all()}
+        for ev in (await session.scalars(
+            select(ClaimEvidence).where(ClaimEvidence.claim_id.in_(all_claim_ids)))).all():
+            ev_by_claim.setdefault(ev.claim_id, []).append(ev)
+        ev_chunk_ids = [ev.chunk_id for evs in ev_by_claim.values() for ev in evs]
+        if ev_chunk_ids:
+            chunks_by_id = {c.id: c for c in (await session.scalars(
+                select(Chunk).where(Chunk.id.in_(ev_chunk_ids)))).all()}
+            ev_doc_ids = {c.document_id for c in chunks_by_id.values()}
+            docs_by_id = {d.id: d for d in (await session.scalars(
+                select(Document).where(Document.id.in_(ev_doc_ids)))).all()}
+
+    def _detail(claim_id: str) -> dict | None:
+        claim = claims_by_id.get(claim_id)
+        if claim is None:
+            return None
+        evidence = []
+        for ev in ev_by_claim.get(claim_id, []):
+            chunk = chunks_by_id.get(ev.chunk_id)
+            doc = docs_by_id.get(chunk.document_id) if chunk else None
+            evidence.append({
+                "chunk_id": ev.chunk_id, "quote": ev.quote,
+                "quote_char_start": ev.quote_char_start,
+                "quote_char_end": ev.quote_char_end,
+                "nli_label": ev.nli_label, "nli_score": ev.nli_score,
+                "chunk_text": chunk.text if chunk else "(chunk removed)",
+                "section": chunk.section if chunk else "",
+                "pages": [chunk.page_start, chunk.page_end] if chunk else [],
+                "document": {
+                    "id": doc.id, "title": doc.title, "url": doc.url,
+                    "source_type": doc.source_type, "status": doc.status,
+                    "abstract_only": doc.abstract_only,
+                } if doc else {"status": "tombstoned"},
+            })
+        return {"claim_id": claim.id, "text": claim.text,
+                "status": claim.status, "evidence": evidence}
 
     sections = []
     for section in report.sections:
-        claims = []
-        for claim_id in section.get("claim_ids", []):
-            detail = await claim_evidence_detail(session, claim_id)
-            if detail:
-                claims.append(detail)
+        claims = [d for cid in section.get("claim_ids", []) if (d := _detail(cid))]
         sections.append({**section, "claims": claims})
 
     citations = (await session.scalars(
@@ -299,6 +426,78 @@ async def report_contradictions(
     return result
 
 
+@router.get("/report/{report_id}/metrics")
+async def report_metrics(
+    report_id: str, refresh: bool = False,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """RAG evaluation metrics for this report (citation accuracy, faithfulness,
+    answer relevance, context precision/recall, latency) with a per-claim
+    evidence trace. Computed once (ML sweep) then cached."""
+    import json
+    report = await session.get(Report, report_id)
+    if report is None:
+        raise NotFoundError("report not found")
+    await _get_project(session, report.project_id, user)
+    cache_key = f"metrics:{report_id}"
+    if not refresh:
+        cached = await redis_store.cache_get(cache_key)
+        if cached is not None:
+            return json.loads(cached)
+    from app.services.evaluation import compute_report_metrics
+    result = await compute_report_metrics(session, report_id)
+    await redis_store.cache_set(cache_key, json.dumps(result), 86400)
+    return result
+
+
+@router.get("/report/{report_id}/next-questions")
+async def report_next_questions(
+    report_id: str,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """Elicit-style 'you might also investigate…' — 2-4 follow-up research
+    directions derived from what this report answered and where it had gaps.
+    Computed once then cached, so the suggestions are free to re-show."""
+    import json
+    report = await session.get(Report, report_id)
+    if report is None:
+        raise NotFoundError("report not found")
+    await _get_project(session, report.project_id, user)
+    cached = await redis_store.cache_get(f"nextq:{report_id}")
+    if cached is not None:
+        return json.loads(cached)
+
+    from app.agents.schemas import NextQuestions
+    from app.llm.router import complete_json
+
+    subqs = [s.get("sub_question", "") for s in report.sections if s.get("sub_question")]
+    gaps = [s.get("gap_note", "") for s in report.sections
+            if s.get("status") == "gap" and s.get("gap_note")]
+    prompt = (
+        "A verified research report was just produced.\n"
+        f"Title: {report.title}\n"
+        "Questions it answered:\n- " + "\n- ".join(subqs[:8]) + "\n"
+    )
+    if gaps:
+        prompt += "Open gaps where evidence was missing:\n- " + "\n- ".join(gaps[:4]) + "\n"
+    prompt += (
+        "Propose 2-4 specific, distinct follow-up research questions a "
+        "researcher would naturally pursue next — going deeper, exploring an "
+        "adjacent angle, or addressing one of the gaps. Each a single, clear, "
+        "self-contained question."
+    )
+    try:
+        r = await complete_json("next_questions", prompt, NextQuestions)
+        questions = [q for q in r.questions if len(q) > 12][:4]
+    except Exception:
+        questions = []
+    result = {"questions": questions}
+    # Short TTL when empty so a transient LLM hiccup can be retried soon.
+    await redis_store.cache_set(f"nextq:{report_id}", json.dumps(result),
+                                86400 if questions else 120)
+    return result
+
+
 # ── Grounded chat / refind / evidence ────────────────────────────────────
 
 class ChatRequest(BaseModel):
@@ -339,6 +538,13 @@ async def claim_evidence(
     claim_id: str,
     session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
 ):
+    # Object-level authz: the claim must belong to a project this user owns.
+    # Without this check any authenticated user could read any claim's quote +
+    # source chunk by id (broken object-level authorization / IDOR).
+    claim = await session.get(Claim, claim_id)
+    if claim is None:
+        raise NotFoundError("claim not found")
+    await _get_project(session, claim.project_id, user)
     detail = await claim_evidence_detail(session, claim_id)
     if detail is None:
         raise NotFoundError("claim not found")
@@ -665,6 +871,191 @@ async def note_delete(
         await _get_project(session, n.project_id, user)
         await session.delete(n)
     return {"deleted": True}
+
+
+# ── Cross-session memory ─────────────────────────────────────────────────
+
+@router.get("/projects/{project_id}/memory")
+async def memory_list(
+    project_id: str,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """Everything the project remembers across runs (most recent first)."""
+    await _get_project(session, project_id, user)
+    rows = (await session.scalars(
+        select(Memory).where(Memory.project_id == project_id)
+        .order_by(Memory.created_at.desc())
+    )).all()
+    return [{"id": m.id, "kind": m.kind, "text": m.text, "source_ref": m.source_ref,
+             "meta": m.meta, "created_at": m.created_at.isoformat()} for m in rows]
+
+
+@router.get("/projects/{project_id}/memory/recall")
+async def memory_recall(
+    project_id: str, q: str, k: int = 5,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """Semantic recall over the project's memory (embedding when available,
+    else keyword+recency). Orientation only — never answer evidence."""
+    await _get_project(session, project_id, user)
+    if len(q.strip()) < 2:
+        raise ValidationFailed("query too short")
+    from app.services.memory import recall
+    return {"results": await recall(session, project_id, q.strip(), k=max(1, min(k, 20)))}
+
+
+class MemoryCreate(BaseModel):
+    text: str = Field(min_length=3, max_length=2000)
+    kind: str = Field(default="preference", pattern="^(episodic|semantic|preference)$")
+
+
+@router.post("/projects/{project_id}/memory", status_code=201)
+async def memory_add(
+    project_id: str, body: MemoryCreate,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """Add a durable memory by hand (e.g. a research preference or a fact to keep)."""
+    await _get_project(session, project_id, user)
+    from app.services.memory import remember
+    m = await remember(session, project_id, body.kind, body.text, source_ref="manual")
+    return {"id": m.id, "kind": m.kind}
+
+
+# ── Welcome-back / continuity ────────────────────────────────────────────
+
+@router.get("/projects/{project_id}/resume")
+async def project_resume(
+    project_id: str,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """Orientation payload shown when a project is opened: unfinished runs,
+    what the project last worked on, open gaps, new alerts, next actions."""
+    await _get_project(session, project_id, user)
+    from app.services.resume import build_resume
+    return await build_resume(session, project_id)
+
+
+@router.post("/runs/{run_id}/resume", status_code=202)
+async def run_resume(
+    run_id: str,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """Re-enqueue a stalled/failed run. execute_run resumes from the last
+    checkpoint, so no work already verified is repeated."""
+    run = await session.get(Run, run_id)
+    if run is None:
+        raise NotFoundError("run not found")
+    await _get_project(session, run.project_id, user)
+    if run.status in _TERMINAL and run.status != "failed":
+        raise ConflictError("this run already finished")
+    run.status = "queued"
+    await redis_store.enqueue_job("run_pipeline", {"run_id": run.id})
+    return {"run_id": run.id, "status": "queued"}
+
+
+# ── Cross-paper comparison ───────────────────────────────────────────────
+
+class CompareRequest(BaseModel):
+    document_ids: list[str] = Field(min_length=2, max_length=5)
+    dimensions: list[str] = Field(default_factory=list, max_length=6)
+    title: str = ""
+
+
+async def _comparison_docs(session: AsyncSession, comp: Comparison) -> dict:
+    docs = {d.id: d for d in (await session.scalars(
+        select(Document).where(Document.id.in_(comp.document_ids))
+    )).all()}
+    return docs
+
+
+@router.post("/projects/{project_id}/compare", status_code=201)
+async def compare_create(
+    project_id: str, body: CompareRequest,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    await _get_project(session, project_id, user)
+    from app.services.compare import comparison_dict, compare_documents
+    try:
+        comp = await compare_documents(
+            session, project_id, body.document_ids,
+            dimensions=body.dimensions or None, title=body.title,
+        )
+    except ValueError as exc:
+        raise ValidationFailed(str(exc))
+    return comparison_dict(comp, await _comparison_docs(session, comp))
+
+
+@router.get("/projects/{project_id}/comparisons")
+async def comparisons_list(
+    project_id: str,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    await _get_project(session, project_id, user)
+    rows = (await session.scalars(
+        select(Comparison).where(Comparison.project_id == project_id)
+        .order_by(Comparison.created_at.desc())
+    )).all()
+    return [{
+        "id": c.id, "title": c.title, "dimensions": c.dimensions,
+        "document_count": len(c.document_ids),
+        "include_in_report": c.include_in_report,
+        "created_at": c.created_at.isoformat(),
+    } for c in rows]
+
+
+@router.get("/comparisons/{comparison_id}")
+async def comparison_get(
+    comparison_id: str,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    comp = await session.get(Comparison, comparison_id)
+    if comp is None:
+        raise NotFoundError("comparison not found")
+    await _get_project(session, comp.project_id, user)
+    from app.services.compare import comparison_dict
+    return comparison_dict(comp, await _comparison_docs(session, comp))
+
+
+@router.post("/comparisons/{comparison_id}/toggle-report")
+async def comparison_toggle_report(
+    comparison_id: str,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """Mark a comparison for inclusion in the project's report view."""
+    comp = await session.get(Comparison, comparison_id)
+    if comp is None:
+        raise NotFoundError("comparison not found")
+    await _get_project(session, comp.project_id, user)
+    comp.include_in_report = not comp.include_in_report
+    return {"id": comp.id, "include_in_report": comp.include_in_report}
+
+
+@router.delete("/comparisons/{comparison_id}")
+async def comparison_delete(
+    comparison_id: str,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    comp = await session.get(Comparison, comparison_id)
+    if comp:
+        await _get_project(session, comp.project_id, user)
+        await session.delete(comp)
+    return {"deleted": True}
+
+
+@router.get("/projects/{project_id}/recommend")
+async def recommend_sources(
+    project_id: str, seed: str = "", k: int = 6,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """Corpus papers similar to a seed set (comma-separated document ids) — the
+    researcher decides what to add to a comparison or report."""
+    await _get_project(session, project_id, user)
+    seed_ids = [s for s in seed.split(",") if s.strip()]
+    if not seed_ids:
+        return {"recommendations": []}
+    from app.services.compare import recommend_related
+    recs = await recommend_related(session, project_id, seed_ids, k=max(1, min(k, 12)))
+    return {"recommendations": recs}
 
 
 # ── Graph ────────────────────────────────────────────────────────────────

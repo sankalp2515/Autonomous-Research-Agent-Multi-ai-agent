@@ -63,3 +63,9 @@ class VerificationUnavailable(AppError):
     """The gate cannot run (e.g. NLI model missing) - we refuse to ship unverified output."""
     code = "verification_unavailable"
     status = 503
+
+
+class ServiceBusyError(AppError):
+    """Load-shedding: the job queue is saturated. Client should retry later."""
+    code = "service_busy"
+    status = 503

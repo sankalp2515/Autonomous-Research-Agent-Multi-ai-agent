@@ -53,6 +53,15 @@ def _init_sentry(settings) -> None:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    # Fail closed: a production deployment must never run with auth disabled.
+    # This turns the single worst footgun (open API because AUTH_DISABLED was
+    # left at its dev default) into a loud boot-time refusal.
+    if settings.app_env == "prod" and settings.auth_disabled:
+        raise RuntimeError(
+            "AUTH_DISABLED=true is not permitted when APP_ENV=prod — refusing to "
+            "start an unauthenticated API. Set AUTH_DISABLED=false and configure "
+            "SUPABASE_URL."
+        )
     _init_sentry(settings)
     app = FastAPI(
         title="Grounded Research Assistant",
@@ -62,12 +71,16 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
     install_observability(app)
+
+    # OpenTelemetry request/httpx/redis spans (no-op unless OTEL_ENABLED).
+    from app.core.otel import init_otel
+    init_otel(app, service_name="veriscope-api")
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError):

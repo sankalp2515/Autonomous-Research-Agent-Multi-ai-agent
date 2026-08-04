@@ -102,8 +102,8 @@ export default function DocumentsView({ projectId }: { projectId: string }) {
         <p><Spinner /> loading corpus…</p>
       ) : docs.length === 0 ? (
         <Empty glyph="⌘" title="Corpus is empty">
-          Upload PDFs or launch a deep research run — papers, repos and blog
-          posts it finds are ingested here permanently and become queryable.
+          Upload PDFs or launch a deep research run — the papers it finds are
+          ingested here permanently and become queryable.
         </Empty>
       ) : (
         <div className="panel" style={{ overflow: "hidden" }}>

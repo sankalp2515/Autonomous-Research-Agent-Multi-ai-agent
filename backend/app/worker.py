@@ -29,7 +29,8 @@ async def handle_job(job: dict) -> None:
     kind = job.get("kind")
     payload = job.get("payload", {})
     if kind == "run_pipeline":
-        await execute_run(payload["run_id"])
+        await execute_run(payload["run_id"], scope=payload.get("scope", "all"),
+                          since_year=payload.get("since_year", 0))
     elif kind == "import_bibtex":
         from app.services.import_lib import import_bibtex_entries
         await import_bibtex_entries(payload["project_id"], payload["entries"])
@@ -81,11 +82,20 @@ async def recover_orphans() -> None:
     """Self-heal on startup. Run rows are the source of truth: any run not in
     a terminal state has no live job after a crash/restart, so rebuild the
     queue from them. Prevents the 'stuck at running forever' orphans that a
-    dead worker leaves behind. Safe because nothing is consuming yet."""
+    dead worker leaves behind.
+
+    Leader-gated: the queue wipe + rebuild must run on EXACTLY ONE worker.
+    Without the lock, a second worker booting concurrently would delete the
+    queue (and any jobs a peer just enqueued) — silent data loss. Whoever wins
+    the lock recovers; the rest skip and go straight to consuming."""
     from sqlalchemy import select
 
     from app.db.models import Run
     from app.db.session import session_scope
+
+    if not await redis_store.acquire_lock("recover_orphans", ttl=60):
+        logger.info("orphan recovery skipped (another worker holds the leader lock)")
+        return
 
     redis = redis_store.get_redis()
     await redis.delete(redis_store.QUEUE, redis_store.PROCESSING)
@@ -103,6 +113,8 @@ async def recover_orphans() -> None:
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
+    from app.core.otel import init_otel
+    init_otel(service_name="veriscope-worker")  # httpx/redis + manual node spans
     await init_db()
     await ensure_collection()
     await recover_orphans()

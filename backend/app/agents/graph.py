@@ -53,10 +53,14 @@ def get_pipeline():
     return _pipeline
 
 
-async def execute_run(run_id: str) -> None:
+async def execute_run(run_id: str, scope: str = "all", since_year: int = 0) -> None:
     """Entry point called by the worker. Resumes from checkpoint if the
     run was interrupted; recursion_limit bounds total graph steps as the
-    last-resort loop guard above the in-state budgets."""
+    last-resort loop guard above the in-state budgets.
+
+    `scope` ("all" | "papers") selects which evidence classes to search; it
+    only applies to a fresh run — a resumed run already carries its scope in
+    the checkpointed state."""
     run_id_var.set(run_id)
     async with session_scope() as session:
         run = await session.get(Run, run_id)
@@ -68,7 +72,8 @@ async def execute_run(run_id: str) -> None:
             logger.info("resuming run from checkpoint",
                         extra={"node": run.current_node})
         else:
-            state = new_state(run_id, run.project_id, run.query)
+            state = new_state(run_id, run.project_id, run.query, scope=scope,
+                              since_year=since_year)
         run.status = "running"
 
     try:

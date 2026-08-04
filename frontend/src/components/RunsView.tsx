@@ -1,12 +1,15 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Run, RunStatus } from "../types";
 import { Empty, Spinner, statusStamp } from "./ui";
 
 const NODES = ["clarify", "plan", "research", "outline", "draft_sections", "assemble", "build_graph"];
+// Researcher-facing labels — the internal node names (assemble, build_graph)
+// don't mean anything to a user.
 const NODE_LABELS: Record<string, string> = {
-  clarify: "clarify", plan: "plan", research: "research", outline: "outline",
-  draft_sections: "draft + gate", assemble: "assemble", build_graph: "graph",
+  clarify: "clarify", plan: "plan searches", research: "search & read",
+  outline: "structure", draft_sections: "draft + verify", assemble: "finalize",
+  build_graph: "link sources",
 };
 
 function Timeline({ status }: { status: RunStatus }) {
@@ -37,9 +40,13 @@ function Timeline({ status }: { status: RunStatus }) {
 export default function RunsView({
   projectId,
   onOpenReport,
+  initial,
+  onInitialConsumed,
 }: {
   projectId: string;
   onOpenReport: (reportId: string) => void;
+  initial?: { text: string; scope: "all" | "papers"; sinceYear: number } | null;
+  onInitialConsumed?: () => void;
 }) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [statuses, setStatuses] = useState<Record<string, RunStatus>>({});
@@ -54,8 +61,20 @@ export default function RunsView({
   const [clarifyAns, setClarifyAns] = useState<string[]>([]);
   const [clarifying, setClarifying] = useState(false);
   const [rejected, setRejected] = useState("");
+  const [nextQs, setNextQs] = useState<string[]>([]);
+  const [launchOpts, setLaunchOpts] = useState<{ scope: "all" | "papers"; sinceYear: number }>(
+    { scope: "all", sinceYear: 0 }
+  );
+  const consumedInitial = useRef(false);
+  // Escape hatch: the launch form is hidden while a run is active (it's
+  // redundant right after launching), but a crashed/stalled run would then
+  // lock the user out forever. This lets them always start another.
+  const [showForm, setShowForm] = useState(false);
 
   const activeRunId = runs.find((r) => ["queued", "running"].includes(r.status))?.id;
+  // Terminal-run status is immutable — fetch it once, then never again. Keeps
+  // the poll from re-fetching full status for every completed run each cycle.
+  const loadedStatus = useRef<Set<string>>(new Set());
 
   // Live SSE stream for the active run — sub-second progress pushes feed the
   // activity log, instead of waiting on the poll interval.
@@ -82,12 +101,23 @@ export default function RunsView({
       const list = await api.listRuns(projectId);
       setRuns(list);
       const active = list.filter((r) => ["queued", "running"].includes(r.status));
+      const terminal = new Set(["completed", "completed_with_gaps", "failed", "rejected"]);
+      // Only hit /status for runs that can still change, or terminal ones we
+      // haven't cached yet — completed runs are fetched exactly once.
+      const targets = list
+        .slice(0, 6)
+        .filter((r) => !terminal.has(r.status) || !loadedStatus.current.has(r.id));
       const detailed = await Promise.all(
-        list.slice(0, 6).map((r) => api.runStatus(r.id).catch(() => null))
+        targets.map((r) => api.runStatus(r.id).catch(() => null))
       );
       setStatuses((prev) => {
         const next = { ...prev };
-        for (const s of detailed) if (s) next[s.run_id] = s;
+        for (const s of detailed) {
+          if (s) {
+            next[s.run_id] = s;
+            if (terminal.has(s.status)) loadedStatus.current.add(s.run_id);
+          }
+        }
         return next;
       });
       return active.length > 0;
@@ -121,6 +151,7 @@ export default function RunsView({
     }
     if (resume?.reportId === latest.report_id) return;
     let alive = true;
+    setNextQs([]);
     api
       .getReport(latest.report_id)
       .then((rep) => {
@@ -137,18 +168,23 @@ export default function RunsView({
         });
       })
       .catch(() => {});
+    // Suggested next research directions (Elicit-style), derived from the report.
+    api
+      .getNextQuestions(latest.report_id)
+      .then((r) => alive && setNextQs(r.questions ?? []))
+      .catch(() => {});
     return () => {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runs]);
 
-  async function startWith(q: string) {
+  async function startWith(q: string, opts = launchOpts) {
     if (!q.trim() || busy) return;
     setBusy(true);
     setError("");
     try {
-      await api.startPipeline(projectId, q.trim());
+      await api.startPipeline(projectId, q.trim(), opts.scope, opts.sinceYear);
       setQuery("");
       await refresh();
     } catch (err: any) {
@@ -171,16 +207,16 @@ export default function RunsView({
 
   // Launch flow: every run first passes through clarify, which (a) rejects
   // off-topic / non-research asks and (b) surfaces clarifying questions to
-  // sharpen the research before it runs (Elicit-style).
-  async function start(e: FormEvent) {
-    e.preventDefault();
-    if (query.trim().length < 8 || clarifying || busy) return;
+  // sharpen the research before it runs (Elicit-style). Shared by the form
+  // submit and the home-composer hand-off, so BOTH actually pause to clarify.
+  async function runClarify(text: string, opts = launchOpts) {
+    if (text.trim().length < 8 || clarifying || busy) return;
     setClarifying(true);
     setError("");
     setRejected("");
     setClarifyQs(null);
     try {
-      const r = await api.clarify(projectId, query.trim());
+      const r = await api.clarify(projectId, text.trim());
       if (!r.allowed) {
         setRejected(r.reason);
         return;
@@ -190,13 +226,31 @@ export default function RunsView({
         setClarifyAns(r.questions.map(() => ""));
         return;
       }
-      await startWith(query.trim());
+      await startWith(text.trim(), opts);
     } catch (err: any) {
       setError(String(err.message ?? err));
     } finally {
       setClarifying(false);
     }
   }
+
+  async function start(e: FormEvent) {
+    e.preventDefault();
+    await runClarify(query);
+  }
+
+  // Home composer hand-off: prefill the staged question and run it through the
+  // clarification pause (so a home launch stops to clarify like any other run).
+  useEffect(() => {
+    if (!initial || consumedInitial.current) return;
+    consumedInitial.current = true;
+    setQuery(initial.text);
+    const opts = { scope: initial.scope, sinceYear: initial.sinceYear };
+    setLaunchOpts(opts);
+    onInitialConsumed?.();
+    runClarify(initial.text, opts);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial]);
 
   return (
     <div className="content-narrow">
@@ -233,9 +287,33 @@ export default function RunsView({
               ))}
             </div>
           )}
+          {nextQs.length > 0 && (
+            <div style={{ marginTop: 18 }}>
+              <div className="resume-gaps-label">You might also investigate</div>
+              <div className="nextq-row">
+                {nextQs.map((q, i) => (
+                  <button key={i} className="nextq-card" onClick={() => startWith(q)} disabled={busy}>
+                    <span className="nextq-tag">◎ suggested</span>
+                    <p>{q}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
+      {activeRunId && !showForm && (
+        <button
+          className="btn btn-ghost"
+          style={{ marginBottom: 20 }}
+          onClick={() => setShowForm(true)}
+        >
+          ＋ Start another run
+        </button>
+      )}
+
+      {(!activeRunId || showForm) && (
       <form onSubmit={start} className="panel card" style={{ marginBottom: 26 }}>
         <span className="overline">New deep research run</span>
         <textarea
@@ -278,12 +356,13 @@ export default function RunsView({
         )}
         {error && <p style={{ color: "var(--bad)", marginBottom: 0 }}>{error}</p>}
       </form>
+      )}
 
       {runs.length === 0 ? (
         <Empty glyph="⟁" title="No runs yet">
-          A run searches arXiv, Semantic Scholar, GitHub and whitelisted blogs,
-          ingests everything into this project's corpus, and drafts a report
-          where every claim must survive the verification gate.
+          A run searches arXiv and Semantic Scholar, ingests the papers into
+          this project's corpus, and drafts a report where every claim must
+          survive the verification gate.
         </Empty>
       ) : (
         <div className="panel">
@@ -324,8 +403,7 @@ export default function RunsView({
                 })()}
                 <div style={{ display: "flex", gap: 18, alignItems: "center", marginTop: 8 }}>
                   <span className="mono" style={{ fontSize: 11, color: "var(--ink-faint)" }}>
-                    {run.budgets_spent?.llm_calls ?? 0} llm calls ·{" "}
-                    {run.budgets_spent?.seconds ?? 0}s
+                    {run.budgets_spent?.seconds ?? 0}s elapsed
                     {st?.live?.sections_total
                       ? ` · sections ${st.live.sections_done}/${st.live.sections_total}`
                       : ""}

@@ -111,5 +111,31 @@ async def nli_entailment(premise: str, hypothesis: str) -> tuple[str, float]:
     return await asyncio.to_thread(_run)
 
 
+async def nli_entailment_batch(
+    pairs: list[tuple[str, str]]
+) -> list[tuple[str, float]]:
+    """Batched entailment: one forward pass (one lock acquisition) for many
+    (premise, hypothesis) pairs, instead of N serialized single calls. The
+    verification gate scores a whole section's claims at once through here —
+    the single biggest inference-throughput win on the hot path."""
+    if not pairs:
+        return []
+    model = _nli()
+    if model is None:
+        return [("skipped", 0.0)] * len(pairs)
+
+    def _run():
+        inputs = [{"text": p[:2000], "text_pair": h[:1000]} for p, h in pairs]
+        with _infer_lock:
+            batched = model(inputs, batch_size=16)
+        out: list[tuple[str, float]] = []
+        for rows in batched:
+            scores = {r["label"].lower(): r["score"] for r in rows}
+            label = max(scores, key=scores.get)
+            out.append((label, scores[label]))
+        return out
+    return await asyncio.to_thread(_run)
+
+
 def nli_available() -> bool:
     return get_settings().ml_nli_enabled
