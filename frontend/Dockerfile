@@ -4,7 +4,7 @@
 #
 # Auth is optional: pass VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY as build
 # args to enable sign-in. Omit them (the default) for a zero-config open demo.
-FROM node:20-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 
 ARG VITE_SUPABASE_URL=""
