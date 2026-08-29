@@ -123,6 +123,7 @@ async def _technical_context(
 async def grounded_chat(
     session: AsyncSession, project_id: str, question: str,
     *, document_ids: list[str] | None = None,
+    entity_refs: list[dict] | None = None,
 ) -> ChatResult:
     # Stage 9.3 - mask identifiers before the question reaches a third-party
     # LLM or the logs. Source text is deliberately NOT masked (see core/pii.py).
@@ -131,11 +132,36 @@ async def grounded_chat(
     if kinds:
         logger.info("masked pii in question", extra={"kinds": kinds})
         question = mask_pii(question)
+    # One-off entity context: the user selected papers / claims / answers
+    # anywhere in the app. Resolve them to a document scope + guaranteed-seeded
+    # evidence chunks, retrieve WITHIN that scope, and merge the seeds so the
+    # exact passages they picked are always in the drafting context. Still runs
+    # the full gate — an ad-hoc context is verified like everything else.
+    if entity_refs:
+        from app.services.chat_context import resolve_entities, seed_chunks
+        scope = await resolve_entities(session, project_id, entity_refs)
+        if scope.empty:
+            answer = Answer(project_id=project_id, question=question, refused=True,
+                            refusal_reason="None of the selected items could be "
+                            "resolved to sources in this project.",
+                            coverage_note="Try selecting papers or verified claims.")
+            session.add(answer)
+            await session.flush()
+            return ChatResult(answer.id, True, answer.refusal_reason,
+                              answer.coverage_note, [], [])
+        doc_ids = list(scope.document_ids) or None
+        retrieved = await retrieve(session, project_id, question,
+                                   document_ids=doc_ids, top_k=16, max_per_doc=3)
+        seeds = await seed_chunks(session, scope.seed_chunk_ids)
+        # Seeds first (guaranteed), then retrieval, deduped by chunk_id.
+        seen = {c.chunk_id for c in seeds}
+        chunks = seeds + [c for c in retrieved if c.chunk_id not in seen]
+        technical: list[TechnicalHit] = []
     # Scoped mode ("Ask this paper"): retrieve only within the given document(s),
     # any source type, and skip the separate practitioner-context panel.
-    if document_ids:
+    elif document_ids:
         chunks = await retrieve(session, project_id, question, document_ids=document_ids)
-        technical: list[TechnicalHit] = []
+        technical = []
     else:
         # Guardrail first: refuse unsafe / clearly off-topic before retrieving.
         ok, why = await _intent_ok(question)

@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -e ".[ml]"
-      - name: Run eval gate
+      - name: Run chat groundedness gate
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
           REDIS_URL: redis://localhost:6380/0
@@ -40,3 +40,32 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python -m evals.run_evals
+
+      - name: Run report-pipeline groundedness gate
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
+          REDIS_URL: redis://localhost:6380/0
+          QDRANT_URL: http://localhost:6333
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python -m evals.run_report_evals
+
+      - name: Threshold calibration (informational)
+        continue-on-error: true
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
+          REDIS_URL: redis://localhost:6380/0
+          QDRANT_URL: http://localhost:6333
+        run: python -m evals.calibrate
+
+      - name: RAGAS second-opinion (informational)
+        continue-on-error: true   # LLM-judge-backed: cross-check, not a hard gate
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
+          REDIS_URL: redis://localhost:6380/0
+          QDRANT_URL: http://localhost:6333
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          pip install -e ".[ragas]"
+          python -m evals.run_ragas

@@ -16,9 +16,8 @@ import json
 import sys
 from pathlib import Path
 
-from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
-from app.db.models import Chunk, Document, Project
+from app.db.models import Project
 from app.db.session import init_db, session_scope
 from app.ingestion.pipeline import ingest_text_document
 from app.services.grounded import grounded_chat
@@ -30,7 +29,12 @@ GATES = {
     "fabricated_citations": 0,
     "claim_support_rate": 0.98,
     "refusal_correctness": 0.95,
+    # Phase 3: the retriever must surface the gold doc for most questions, or the
+    # whole gate is just guarding an under-recalled context. Tune as the golden
+    # set grows; starts deliberately conservative.
+    "retrieval_recall": 0.90,
 }
+RETRIEVAL_K = 10
 
 
 async def run() -> int:
@@ -94,6 +98,13 @@ async def run() -> int:
     refusal_rate = correct_refusals / len(golden["unsupported_questions"])
     answer_rate = sum(answered_with_content) / len(golden["supported_questions"])
 
+    # Phase 3: retrieval-quality metrics against the same gold labels.
+    from evals.retrieval_eval import evaluate_retrieval
+    async with session_scope() as session:
+        retrieval = await evaluate_retrieval(
+            session, project_id, golden["supported_questions"], doc_map, k=RETRIEVAL_K)
+    recall = retrieval[f"recall@{RETRIEVAL_K}"]
+
     results = {
         "claims_total": total_claims,
         "claim_support_rate": round(support_rate, 3),
@@ -101,6 +112,7 @@ async def run() -> int:
         "miscited_claims": miscited,
         "refusal_correctness": round(refusal_rate, 3),
         "supported_answer_rate": round(answer_rate, 3),
+        "retrieval": {k: v for k, v in retrieval.items() if k != "per_question"},
     }
     print("\n=== EVAL RESULTS ===")
     print(json.dumps(results, indent=2))
@@ -112,6 +124,8 @@ async def run() -> int:
         failures.append(f"claim_support_rate {support_rate:.3f} < 0.98")
     if refusal_rate < GATES["refusal_correctness"]:
         failures.append(f"refusal_correctness {refusal_rate:.3f} < 0.95")
+    if recall < GATES["retrieval_recall"]:
+        failures.append(f"retrieval recall@{RETRIEVAL_K} {recall:.3f} < {GATES['retrieval_recall']}")
 
     if failures:
         print("\nRELEASE GATES FAILED:")

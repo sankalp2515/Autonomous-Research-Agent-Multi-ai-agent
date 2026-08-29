@@ -21,11 +21,19 @@ from app.ml.local_models import nli_available, nli_entailment_batch
 logger = get_logger("analysis")
 
 _MAX_CLAIMS = 40          # bound the pair sweep (cheaper now that pairs are gated)
-_CONTRA_THRESHOLD = 0.75  # NLI contradiction confidence to flag
+# A false tension is far more damaging to a TRUST product than a missed one, so
+# this detector is tuned hard for precision over recall. The local NLI model
+# readily mislabels two merely-DIFFERENT same-topic sentences as
+# "contradiction"; the guards below (high topical gate, high confidence bar, and
+# a symmetric-contradiction requirement in find_contradictions) exist to kill
+# those false positives.
+_CONTRA_THRESHOLD = 0.85  # NLI contradiction confidence to flag (per direction)
 # Two claims can only meaningfully contradict if they are ABOUT the same thing.
 # Gating pairs on embedding similarity kills spurious "contradictions" between
 # unrelated statements and cuts the O(n^2) NLI cost by an order of magnitude.
-_MIN_TOPICAL_SIM = 0.40
+# Kept high: two claims that merely both mention "predictive maintenance" are
+# not on the same specific proposition and must not be paired.
+_MIN_TOPICAL_SIM = 0.58
 
 
 async def _report_claims(session: AsyncSession, report: Report) -> list[dict]:
@@ -86,8 +94,13 @@ async def find_contradictions(session: AsyncSession, report_id: str) -> list[dic
     if not pairs:
         return []
 
-    # 2. Score both directions in ONE batched forward pass (NLI is asymmetric:
-    #    A may contradict B without B contradicting A). Take the stronger signal.
+    # 2. Score BOTH directions in ONE batched forward pass. A genuine source
+    #    disagreement contradicts symmetrically ("X rises" vs "X falls" — each
+    #    contradicts the other), whereas the local NLI model's false positives on
+    #    merely-different same-topic sentences are almost always one-directional
+    #    and lower-confidence. So we require BOTH directions to be labelled
+    #    contradiction and take the WEAKER score to clear the (high) bar. This
+    #    trades recall for the precision a trust product demands.
     scored = await nli_entailment_batch(
         [(claims[i]["text"], claims[j]["text"]) for i, j in pairs]
         + [(claims[j]["text"], claims[i]["text"]) for i, j in pairs]
@@ -97,12 +110,11 @@ async def find_contradictions(session: AsyncSession, report_id: str) -> list[dic
     flagged: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for idx, (i, j) in enumerate(pairs):
-        best = max(
-            (scored[idx], scored[idx + half]),
-            key=lambda t: t[1] if t[0] == "contradiction" else -1.0,
-        )
-        label, score = best
-        if label != "contradiction" or score < _CONTRA_THRESHOLD:
+        fwd, rev = scored[idx], scored[idx + half]
+        if fwd[0] != "contradiction" or rev[0] != "contradiction":
+            continue  # not a symmetric disagreement — almost certainly noise
+        score = min(fwd[1], rev[1])  # the weaker direction must still be confident
+        if score < _CONTRA_THRESHOLD:
             continue
         a, b = claims[i], claims[j]
         key = tuple(sorted((a["claim_id"], b["claim_id"])))

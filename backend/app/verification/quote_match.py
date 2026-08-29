@@ -35,13 +35,40 @@ class QuoteMatch:
     char_end: int
 
 
+# ── Markdown scaffolding is LAYOUT, not content ──────────────────────────
+#
+# pymupdf4llm renders a paper's tables as markdown, which is why table findings
+# are extractable at all — but it means the stored chunk reads
+#
+#     |RAPTOR (2024)<br>10,142,221|20396.49s|-|
+#
+# while the model, quoting the same fact in the same document, writes
+# "RAPTOR (2024) 10,142,221". Those are the same characters separated by cell
+# scaffolding, and the gate was scoring them as a quote mismatch. Measured on
+# the GraphRAG calibration report, 15 of 34 refusals were quote_mismatch and
+# several were exactly this: TRUE, correctly-sourced table findings thrown away
+# because a pipe sits where a space would be.
+#
+# This is a normalization, not a relaxation. The pipe, the emphasis run and the
+# <br> are inserted by OUR parser; they are not in the paper. Removing them on
+# BOTH sides compares the text the author actually wrote. A claim still has to
+# carry every content character verbatim — nothing here lets a paraphrase pass.
+_MD_BREAK = re.compile(r"<br\s*/?>", re.I)
+_MD_STRIP = re.compile(r"[*`]+")
+# Underscore only where it delimits emphasis (_italic_), never inside an
+# identifier: stripping it unconditionally would fuse `snake_case` to
+# `snakecase` and `alpha_t` to `alphat`, quietly changing symbol names in a
+# corpus full of them.
+_MD_UNDERSCORE = re.compile(r"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])")
+
+
 def normalize(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text)
-    text = text.translate(_TRANSLATE)
-    # PDF line-break hyphenation: "improve-\nment" -> "improvement"
-    text = re.sub(r"-\s*\n\s*", "", text)
-    text = _WS.sub(" ", text)
-    return text.strip().lower()
+    """Kept as the single public entry point, but DELEGATES to the offset-mapped
+    implementation. These two used to be parallel hand-written copies of the
+    same rules — the quote normalized by one and the chunk by the other — so any
+    edit to one silently broke matching until both were updated. Deriving one
+    from the other makes divergence impossible."""
+    return _norm_with_map(text)[0]
 
 
 def _norm_with_map(text: str) -> tuple[str, list[int]]:
@@ -53,6 +80,37 @@ def _norm_with_map(text: str) -> tuple[str, list[int]]:
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
+        # ── markdown scaffolding (see the constants above) ───────────────
+        # Emitted by our own parser, so it is dropped before comparison and
+        # never contributes an offset. Handled HERE rather than in a pre-pass
+        # because the index map has to stay aligned to the ORIGINAL chunk —
+        # a regex sub would shift every offset after it and point the reader's
+        # highlighted span at the wrong characters.
+        if ch in "*`":
+            i += 1
+            continue
+        if ch == "<":
+            m = _MD_BREAK.match(text, i)
+            if m:
+                # A cell break separates content: collapse to a space so
+                # "RAPTOR<br>10,142,221" reads as two words, not one.
+                if out and out[-1] != " ":
+                    out.append(" ")
+                    omap.append(i)
+                i = m.end()
+                continue
+        if ch == "|":
+            if out and out[-1] != " ":
+                out.append(" ")
+                omap.append(i)
+            i += 1
+            continue
+        if ch == "_":
+            prev_alnum = i > 0 and text[i - 1].isalnum()
+            next_alnum = i + 1 < n and text[i + 1].isalnum()
+            if not (prev_alnum and next_alnum):  # emphasis, not an identifier
+                i += 1
+                continue
         # hyphenated line break
         if ch == "-" and i + 1 < n:
             j = i + 1

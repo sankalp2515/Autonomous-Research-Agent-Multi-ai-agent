@@ -57,3 +57,15 @@ export async function signUp(email: string, password: string) {
 export async function signOut() {
   await supabase?.auth.signOut();
 }
+
+// Kick off the "forgot password" flow: Supabase emails a recovery link that
+// returns the user to the app with a recovery session. We don't reveal whether
+// the address exists (anti-enumeration) — the UI shows the same message either
+// way.
+export async function resetPassword(email: string) {
+  if (!supabase) throw new Error("auth not configured");
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin,
+  });
+  if (error) throw error;
+}

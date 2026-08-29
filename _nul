@@ -1,1 +1,48 @@
-[{"id":"b2c425d23d9a4c5c87a2d52e76ab0e01","name":"new test","description":"Current research on context window optimization","documents":38,"runs":1,"created_at":"2026-06-16T19:11:15.891874+00:00"},{"id":"6d751708685947dea4445a6c645976a1","name":"e2e crashfix verify","description":"","documents":91,"runs":2,"created_at":"2026-06-16T15:10:37.761427+00:00"},{"id":"a49fcc5e273541719559d6c970be3d8d","name":"context window optimization","description":"","documents":0,"runs":1,"created_at":"2026-06-16T14:39:53.386418+00:00"},{"id":"f2b57c91726b42a59c8bd2c399d2446c","name":"Context Window optimization","description":"","documents":53,"runs":3,"created_at":"2026-06-16T14:07:30.181742+00:00"},{"id":"c620fcc81c19417aa422059ff59b6195","name":"Current approaches to reducing hallucination in retrieval…","description":"Current approaches to reducing hallucination in retrieval-augmented generation","documents":0,"runs":1,"created_at":"2026-06-16T14:07:02.797870+00:00"},{"id":"7f1168e7a78645dfba0869090f6a806f","name":"E2E flight","description":"single watched run","documents":55,"runs":1,"created_at":"2026-06-14T06:41:15.934535+00:00"},{"id":"5ca2ce14cc4c4cb5a29f7f091f83da51","name":"Smoke run 2","description":"e2e","documents":0,"runs":1,"created_at":"2026-06-14T06:38:16.953907+00:00"},{"id":"aa06e91d2d314cd08049c2db5492f4e2","name":"Smoke: RAG hallucination","description":"end-to-end flight","documents":18,"runs":2,"created_at":"2026-06-13T13:19:38.845189+00:00"},{"id":"aa9858f74bcf4e2792c794916da97c6c","name":"RAG hallucination survey","description":"Evidence map of grounding techniques and their failure modes","documents":0,"runs":0,"created_at":"2026-06-12T07:36:23.925741+00:00"}]
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#8c2f39" />
+    <title>Veriscope — verifiable research</title>
+    <meta
+      name="description"
+      content="A research workspace where every claim resolves to a real source, carries a verbatim quote, and passes an entailment check — or it isn't shown."
+    />
+
+    <!-- Icons -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+
+    <!-- Open Graph / Twitter — so shared report links render a real card
+         instead of a bare URL in Slack / X / LinkedIn. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Veriscope" />
+    <meta property="og:title" content="Veriscope — verifiable research" />
+    <meta
+      property="og:description"
+      content="Every claim resolves to a real source, carries a verbatim quote, and passes an entailment check — or it isn't shown."
+    />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Veriscope — verifiable research" />
+    <meta
+      name="twitter:description"
+      content="Every claim resolves to a real source, carries a verbatim quote, and passes an entailment check — or it isn't shown."
+    />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- Type roles: Hanken Grotesk = UI chrome · Spectral = reading surface
+         (serif) · JetBrains Mono = provenance / machine-verified meta. -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Spectral:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <script type="module" crossorigin src="/assets/index--9MrpPrU.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CeOReLi4.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

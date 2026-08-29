@@ -1,0 +1,102 @@
+# Veriscope Prometheus alert rules (audit D4).
+#
+# Built on the series the API actually exposes at /metrics
+# (app/core/observability.py): http_requests_total, http_request_seconds,
+# llm_calls_total, llm_tokens_total, gate_claims_total, pipeline_node_seconds,
+# ingest_documents_total.
+#
+# NOTE on worker liveness: the background worker does NOT expose a /metrics
+# endpoint — it logs a heartbeat (~every 30s, app/worker.py). Alert on the
+# ABSENCE of that heartbeat log via Loki/promtail (a log-based alert), not here.
+# The `up` alert below only covers the API scrape target.
+
+groups:
+  - name: veriscope-availability
+    rules:
+      - alert: VeriscopeAPIDown
+        expr: up{job="veriscope-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Veriscope API scrape target is down"
+          description: "Prometheus cannot scrape the API for >2m. It is down or unreachable."
+
+      - alert: VeriscopeHigh5xxRate
+        expr: >
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          / clamp_min(sum(rate(http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "API 5xx rate above 5%"
+          description: "More than 5% of API responses are 5xx over the last 5m."
+
+      - alert: VeriscopeHighLatencyP99
+        expr: >
+          histogram_quantile(0.99, sum(rate(http_request_seconds_bucket[5m])) by (le)) > 5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "API p99 latency above 5s"
+          description: "p99 request latency has exceeded 5s for 10m."
+
+  - name: veriscope-llm
+    rules:
+      - alert: VeriscopeLLMProviderErrorRate
+        expr: >
+          sum(rate(llm_calls_total{outcome=~"error|timeout"}[10m]))
+          / clamp_min(sum(rate(llm_calls_total{outcome=~"ok|error|timeout"}[10m])), 0.001) > 0.3
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "LLM error/timeout rate above 30%"
+          description: "The provider fallback chain is failing often — check provider status / keys / RPM budgets."
+
+      - alert: VeriscopeAllLLMCallsFailing
+        expr: >
+          sum(rate(llm_calls_total{outcome="ok"}[10m])) == 0
+          and sum(rate(llm_calls_total{outcome=~"error|timeout"}[10m])) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Zero successful LLM calls while errors continue"
+          description: "No provider is succeeding — runs cannot draft. Likely all keys unfunded/expired."
+
+  - name: veriscope-trust
+    rules:
+      # Trust signal: the gate is REJECTING most claims. Not necessarily wrong
+      # (refusal over fabrication is by design), but a sustained collapse in the
+      # verified fraction usually means a corpus/model/threshold regression worth
+      # a human look — this product's core metric.
+      - alert: VeriscopeGateVerifiedFractionLow
+        expr: >
+          sum(rate(gate_claims_total{outcome="verified"}[30m]))
+          / clamp_min(sum(rate(gate_claims_total[30m])), 0.001) < 0.3
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "Verification gate is verifying <30% of claims"
+          description: "Sustained low verified fraction — check retrieval quality, drafting model, and NLI thresholds (docs/CALIBRATION.md)."
+
+  - name: veriscope-ingest
+    rules:
+      - alert: VeriscopeIngestQuarantineRate
+        expr: >
+          sum(rate(ingest_documents_total{outcome="quarantined"}[15m]))
+          / clamp_min(sum(rate(ingest_documents_total[15m])), 0.001) > 0.25
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Over 25% of ingested documents are being quarantined"
+          description: "Parser or source quality problem — inspect recent quarantined documents' status_reason."
+
+  - name: veriscope-pipeline
+    rules:
+      - alert: VeriscopePipelineNodeSlow
+        expr: >
+          histogram_quantile(0.95, sum(rate(pipeline_node_seconds_bucket[30m])) by (le, node)) > 300
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Pipeline node p95 above 5 minutes ({{ $labels.node }})"
+          description: "Node {{ $labels.node }} p95 duration exceeds 300s — investigate external source / inference contention."

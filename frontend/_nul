@@ -1,25 +1,103 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <script type="module">import { injectIntoGlobalHook } from "/@react-refresh";
-injectIntoGlobalHook(window);
-window.$RefreshReg$ = () => {};
-window.$RefreshSig$ = () => (type) => type;</script>
+<html><head><meta charset="utf-8"><title>UI check</title>
+<link rel="stylesheet" href="./assets/index-D7UjOiQD.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side"><div class="side-brand"><span class="logo"></span><h1>Veriscope</h1></div></aside>
+  <div class="main">
+    <div class="content">
+      <div class="rp rise-in">
+        <div class="rp-body">
+          <header class="rp-hero">
+            <div class="export-bar">
+              <span class="rp-kick">Verified research report</span>
+              <span class="spacer"></span>
+              <button class="export-open">Export</button>
+            </div>
+            <h1 class="rp-title">Autonomous AI Agents in Supply Chain Management</h1>
+          </header>
 
-    <script type="module" src="/@vite/client"></script>
+          <p style="max-width:64ch">Prose keeps the reading measure — this paragraph must stay
+          narrow while the grid below breaks out into the empty margins.</p>
 
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Veriscope — grounded research</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx?t=1781641537117"></script>
-  </body>
-</html>
+          <section class="rp-matrix" id="evidence-matrix">
+            <div class="rp-matrix-h">
+              <h2>Evidence matrix</h2>
+              <span class="rp-matrix-meta">20 studies · 46 verified findings · 5 dimensions</span>
+              <button class="rp-matrix-toggle">hide</button>
+            </div>
+            <p class="rp-matrix-sub">Each paper was read on its own terms, with a separate search per
+              dimension. An empty cell is labeled with what it means:
+              <span class="rp-cell-key rp-cell-none">not reported</span> is a finding about the study;
+              <span class="rp-cell-key rp-cell-na">n/a</span> means the dimension cannot apply; and
+              <span class="rp-cell-key rp-cell-unk">unresolved</span> means <em>we</em> could not establish either way.</p>
+            <div class="rp-table-wrap">
+              <table class="rp-table rp-matrix-table">
+                <thead><tr><th>Study</th><th>limitation</th><th>automation capability</th>
+                  <th>compliance monitoring</th><th>retrieval accuracy</th><th>fuel consumption</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row"><span class="rp-mx-title">Chatting with your ERP: A Recipe</span>
+                    <span class="rp-mx-year">2025</span><span class="rp-mx-tags">dual-agent architecture</span></th>
+                    <td><span class="rp-td-claim">The agent requires manual alignment with the database through a natural language description written by an expert, which limits scalability.<sup class="rp-cite">¶</sup></span></td>
+                    <td><span class="rp-td-claim">The agent is capable of interpreting natural language queries and translating them into executable SQL statements.<sup class="rp-cite">¶</sup></span></td>
+                    <td><span class="rp-cell-unk">unresolved</span></td>
+                    <td><span class="rp-td-claim"><strong class="rp-mx-value">10/11</strong> The Devstral 24B Q4 model achieved the highest accuracy of 10/11 on the benchmark.<sup class="rp-cite">¶</sup></span></td>
+                    <td><span class="rp-cell-none">not reported</span></td></tr>
+                  <tr><th scope="row"><span class="rp-mx-title">An Event-Driven Architecture for Autonomous Supply Chain Risk Detection</span><span class="rp-mx-year">2025</span></th>
+                    <td><span class="rp-td-claim">Reinforcement learning approaches for autonomous agents require significant training data and carry the risk of erratic decision-making outside training conditions.<sup class="rp-cite">¶</sup></span></td>
+                    <td><span class="rp-td-claim">The proposed architecture utilizes a multi-agent orchestration layer and decision-action layer to automate supply chain workflows.<sup class="rp-cite">¶</sup></span></td>
+                    <td><span class="rp-td-claim">The architecture incorporates a dedicated Governance and Compliance layer providing audit logging, encryption and identity management.<sup class="rp-cite">¶</sup></span></td>
+                    <td><span class="rp-cell-na">n/a</span></td>
+                    <td><span class="rp-cell-none">not reported</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="rp-sok">
+            <div class="rp-matrix-h"><h2>State of the evidence</h2>
+              <span class="rp-matrix-meta">4 dimensions across 18 studies</span></div>
+            <ul class="rp-sok-list">
+              <li><div class="rp-sok-head"><span class="dim">retrieval accuracy</span>
+                <span class="rp-sok-state st-moderately_supported">moderately supported</span>
+                <span class="n">15 studies · 78% of the corpus</span></div>
+                <p class="rp-sok-basis">15 independent studies report this dimension, but at most 1 of them measured it the same way, so the agreement is real but thinly comparable.</p></li>
+              <li><div class="rp-sok-head"><span class="dim">computational efficiency</span>
+                <span class="rp-sok-state st-contested">contested</span>
+                <span class="n">13 studies · 72% of the corpus</span></div>
+                <p class="rp-sok-basis">13 studies report this dimension, and 2 pairs disagree on the same measurement with no difference in recorded conditions to explain it.</p></li>
+            </ul>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-veil">
+  <div class="modal-card export-modal" role="dialog">
+    <div class="xm-head">
+      <span class="xm-icon">⇩</span>
+      <div><h3>Export &amp; Share Research Report</h3>
+        <p>Download citation-grounded formats for Zotero, Mendeley, Obsidian, or publication.</p></div>
+      <button class="xm-x">×</button>
+    </div>
+    <div class="xm-formats">
+      <div class="xm-format"><span class="xm-f-icon">▤</span>
+        <div class="xm-f-text"><b>Full Markdown Report (.md)</b><span>Includes inline citations, NLI scores, and complete footnotes.</span></div>
+        <button class="xm-copy">Copy</button><button class="xm-dl primary">Download .md</button></div>
+      <div class="xm-format"><span class="xm-f-icon">❯</span>
+        <div class="xm-f-text"><b>BibTeX Bibliography (.bib)</b><span>Formatted entries for LaTeX, Overleaf, and reference managers.</span></div>
+        <button class="xm-copy">Copy</button><button class="xm-dl">Download .bib</button></div>
+      <div class="xm-format"><span class="xm-f-icon">▢</span>
+        <div class="xm-f-text"><b>RIS Reference Citation (.ris)</b><span>Compatible with EndNote, RefWorks, and Zotero.</span></div>
+        <button class="xm-copy">Copy</button><button class="xm-dl">Download .ris</button></div>
+    </div>
+    <div class="xm-foot">
+      <button class="xm-print">Print / Save as Clean PDF</button>
+      <button class="xm-share">Copy Shareable Link</button>
+    </div>
+  </div>
+</div>
+</body></html>

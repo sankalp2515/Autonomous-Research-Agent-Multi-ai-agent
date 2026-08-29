@@ -11,6 +11,7 @@ export default function NewProjectModal({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -24,8 +25,13 @@ export default function NewProjectModal({
     e.preventDefault();
     if (!name.trim() || busy) return;
     setBusy(true);
+    setError("");
     try {
       await onCreate(name.trim(), description.trim());
+    } catch (err: any) {
+      // Previously this failed silently — the spinner stopped and nothing
+      // happened. Now the user sees why and can retry.
+      setError(err?.message ?? "Couldn’t create the project. Please try again.");
     } finally {
       setBusy(false);
     }
@@ -55,6 +61,7 @@ export default function NewProjectModal({
             onChange={(e) => setDescription(e.target.value)}
             style={{ minHeight: 64, marginBottom: 16 }}
           />
+          {error && <p style={{ color: "var(--bad)", fontSize: 12.5, margin: "0 0 12px" }}>{error}</p>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
             <button type="button" className="btn btn-ghost" onClick={onClose}>
               Cancel

@@ -136,3 +136,128 @@ async def test_entity_check_can_be_disabled(monkeypatch):
     )
     result = await verify_claim(claim, chunk)
     assert result.verified  # guard off -> passes deterministic layers
+
+
+# ── Layer 3: NLI entailment branch (model mocked; no torch needed) ───────────
+# These exercise the decision logic the real model feeds, without loading it —
+# previously this branch was only touched in evals "where the model is
+# available", leaving the gate's truth decision itself untested in unit CI.
+
+import app.verification.gate as gate  # noqa: E402
+
+# A claim that clears layers 1-2.5 (quote present, no over-specified entity) so
+# execution always reaches the NLI layer under test.
+_NLI_CLAIM = ClaimInput(
+    text="It reduced factual errors by 37% versus closed-book generation.",
+    chunk_id="c1",
+    quote="reduced factual errors by 37% compared to closed-book generation",
+)
+
+
+def _mock_nli(monkeypatch, label: str, score: float):
+    """Turn the NLI layer ON and pin its verdict for both the single and batched
+    paths. Patches the names bound INTO the gate module (it imports them by
+    value), which is what the gate actually calls."""
+    monkeypatch.setattr(gate, "nli_available", lambda: True)
+
+    async def _single(premise, hypothesis):
+        return (label, score)
+
+    async def _batch(pairs):
+        return [(label, score) for _ in pairs]
+
+    monkeypatch.setattr(gate, "nli_entailment", _single)
+    monkeypatch.setattr(gate, "nli_entailment_batch", _batch)
+
+
+async def test_nli_entailment_passes(monkeypatch):
+    _mock_nli(monkeypatch, "entailment", 0.95)
+    result = await verify_claim(_NLI_CLAIM, CHUNK_TEXT)
+    assert result.verified and result.reason == "ok"
+    assert result.evidence.nli_label == "entailment"
+
+
+async def test_nli_contradiction_fails(monkeypatch):
+    _mock_nli(monkeypatch, "contradiction", 0.90)
+    result = await verify_claim(_NLI_CLAIM, CHUNK_TEXT)
+    assert not result.verified and result.reason == "nli_contradiction"
+
+
+async def test_nli_strong_neutral_fails_as_out_of_context(monkeypatch):
+    # Quote matches, but the chunk says nothing ABOUT the claim (strong neutral):
+    # out-of-context quoting must be rejected.
+    _mock_nli(monkeypatch, "neutral", 0.90)
+    result = await verify_claim(_NLI_CLAIM, CHUNK_TEXT)
+    assert not result.verified and result.reason == "nli_weak"
+
+
+async def test_nli_mild_neutral_passes(monkeypatch):
+    # Below the 0.85 strong-neutral bar -> not enough to reject a quote-matched,
+    # entity-clean claim.
+    _mock_nli(monkeypatch, "neutral", 0.50)
+    result = await verify_claim(_NLI_CLAIM, CHUNK_TEXT)
+    assert result.verified and result.reason == "ok"
+
+
+async def test_batched_and_single_nli_agree(monkeypatch):
+    # The two code paths must never diverge on the same verdict.
+    _mock_nli(monkeypatch, "contradiction", 0.90)
+    single = await verify_claim(_NLI_CLAIM, CHUNK_TEXT)
+    report = await verify_claims([_NLI_CLAIM], {"c1": CHUNK_TEXT})
+    assert report.results[0].verified == single.verified
+    assert report.results[0].reason == single.reason == "nli_contradiction"
+
+
+# ── Fail-closed: required-but-unavailable NLI must refuse, never quote-only ───
+# (A1) In an environment where NLI is REQUIRED (prod), the gate must raise rather
+# than silently pass claims on quote-match alone.
+
+from app.core.exceptions import VerificationUnavailable  # noqa: E402
+
+
+async def test_fail_closed_when_nli_required_but_disabled(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_env", "prod")   # -> nli_required True
+    monkeypatch.setattr(settings, "ml_nli_enabled", False)
+    monkeypatch.setattr(gate, "nli_available", lambda: False)
+    with pytest.raises(VerificationUnavailable):
+        await verify_claims([_NLI_CLAIM], {"c1": CHUNK_TEXT})
+    with pytest.raises(VerificationUnavailable):
+        await verify_claim(_NLI_CLAIM, CHUNK_TEXT)
+
+
+async def test_fail_closed_when_nli_required_but_model_not_operational(monkeypatch):
+    # Flag ON but the model failed to load -> it returns "skipped". Where NLI is
+    # required, a broken truth layer is a refusal, not a pass.
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "ml_nli_enabled", True)
+    monkeypatch.setattr(gate, "nli_available", lambda: True)
+
+    async def _skipped_single(premise, hypothesis):
+        return ("skipped", 0.0)
+
+    async def _skipped_batch(pairs):
+        return [("skipped", 0.0) for _ in pairs]
+
+    monkeypatch.setattr(gate, "nli_entailment", _skipped_single)
+    monkeypatch.setattr(gate, "nli_entailment_batch", _skipped_batch)
+    with pytest.raises(VerificationUnavailable):
+        await verify_claims([_NLI_CLAIM], {"c1": CHUNK_TEXT})
+    with pytest.raises(VerificationUnavailable):
+        await verify_claim(_NLI_CLAIM, CHUNK_TEXT)
+
+
+def test_assert_verification_ready_refuses_prod_without_nli(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "ml_nli_enabled", False)
+    with pytest.raises(RuntimeError, match="ML_NLI_ENABLED"):
+        gate.assert_verification_ready()
+
+
+def test_assert_verification_ready_ok_in_dev(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_env", "dev")
+    monkeypatch.setattr(settings, "ml_nli_enabled", False)
+    gate.assert_verification_ready()  # must not raise

@@ -79,15 +79,27 @@ def _xml_field(blob: str, tag: str) -> str:
     return re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
 
 
-async def search_arxiv(query: str, max_results: int = 15,
+# arXiv query shape: MEASURED, not assumed. The natural-language query is sent
+# to `all:` as-is. A previous change reshaped it into an AND/OR term query on the
+# theory that `all:` is a strict term index and a sentence would over-constrain
+# it. Tested against the live API on a real research question, the sentence
+# returned 40 hits (the cap) and the term query returned 3 — `all:` evidently
+# ranks by relevance rather than requiring every term, so reshaping strictly
+# LOSES recall. The binding constraint was never the query shape; it was
+# max_results, which is why that is what moved (15 -> 40).
+
+async def search_arxiv(query: str, max_results: int = 40,
                        sort_by: str = "relevance",
-                       since_year: int | None = None) -> list[PaperHit]:
+                       since_year: int | None = None,
+                       until_year: int | None = None) -> list[PaperHit]:
     # Apply the time window at SEARCH time, not just at retrieval: every paper
     # we fetch costs a PDF download + parse + embed (~30-45s each), so filtering
     # after ingest burns minutes on documents we then discard.
     search_query = f"all:{query}"
-    if since_year:
-        search_query += f" AND submittedDate:[{since_year}01010000 TO 999912312359]"
+    if since_year or until_year:
+        lo = f"{since_year}01010000" if since_year else "190001010000"
+        hi = f"{until_year}12312359" if until_year else "999912312359"
+        search_query += f" AND submittedDate:[{lo} TO {hi}]"
     try:
         resp = await _get(
             "https://export.arxiv.org/api/query",
@@ -115,8 +127,9 @@ async def search_arxiv(query: str, max_results: int = 15,
 
 # ── Semantic Scholar ─────────────────────────────────────────────────────
 
-async def search_semantic_scholar(query: str, max_results: int = 15,
-                                  since_year: int | None = None) -> list[PaperHit]:
+async def search_semantic_scholar(query: str, max_results: int = 40,
+                                  since_year: int | None = None,
+                                  until_year: int | None = None) -> list[PaperHit]:
     settings = get_settings()
     headers = {}
     if settings.semantic_scholar_api_key:
@@ -126,8 +139,13 @@ async def search_semantic_scholar(query: str, max_results: int = 15,
         "fields": "title,abstract,year,authors,externalIds,openAccessPdf,url,"
                   "citationCount,venue",
     }
-    if since_year:
-        params["year"] = f"{since_year}-"   # S2 open-ended range, e.g. "2021-"
+    # S2 supports closed/open year ranges: "2024-2026", "2021-", "-2020".
+    if since_year and until_year:
+        params["year"] = f"{since_year}-{until_year}"
+    elif since_year:
+        params["year"] = f"{since_year}-"
+    elif until_year:
+        params["year"] = f"-{until_year}"
     try:
         resp = await _get(
             "https://api.semanticscholar.org/graph/v1/paper/search",

@@ -4,7 +4,6 @@ Each stage is separately retryable; a document failure quarantines that
 document with a reason and never blocks the batch. Idempotent by sha256.
 """
 
-import asyncio
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,6 +90,27 @@ async def ingest_pdf_document(
 
     doc.full_text_available = True
     doc.status = "indexed"
+    # FIGURES ARE RECORDED, NOT READ (yet). Nothing in the pipeline can
+    # interpret a chart today, so this does not add evidence — it removes a
+    # silent one. Until now a figure left no trace at all, so "this paper does
+    # not report that number" and "the number is in a bar chart we never
+    # opened" were indistinguishable, and only the first was ever shown.
+    # Persisting the inventory lets the second be stated. Stored on `meta`
+    # (already JSON) so no migration is needed, and capped so a poster session
+    # with hundreds of images cannot bloat the row.
+    if parsed.figures:
+        doc.meta = {
+            **(doc.meta or {}),
+            "figures": {
+                "count": len(parsed.figures),
+                "captioned": sum(1 for f in parsed.figures if f.caption),
+                "items": [
+                    {"page": f.page_number, "xref": f.xref, "bbox": list(f.bbox),
+                     "w": f.width, "h": f.height, "caption": f.caption[:240]}
+                    for f in parsed.figures[:60]
+                ],
+            },
+        }
     if parsed.failed_pages:
         doc.status_reason = f"pages failed to parse: {parsed.failed_pages}"
     INGEST_DOCS.labels(source_type, "indexed").inc()
@@ -242,18 +262,38 @@ async def reindex_pending(session: AsyncSession, project_id: str) -> int:
     if not rows:
         return 0
     docs = {r.document_id for r in rows}
+    repaired = 0
     for doc_id in docs:
         doc_rows = [r for r in rows if r.document_id == doc_id]
         doc = await session.get(Document, doc_id)
         title = doc.title if doc else ""
-        vectors = await embed_texts(
-            [context_text(title, r.section, r.text) for r in doc_rows]
-        )
-        await upsert_chunks([
-            (r.id, vec, {"project_id": project_id, "document_id": doc_id})
-            for r, vec in zip(doc_rows, vectors)
-        ])
-        await session.execute(
-            update(Chunk).where(Chunk.id.in_([r.id for r in doc_rows])).values(embedded=True)
-        )
-    return len(rows)
+        try:
+            vectors = await embed_texts(
+                [context_text(title, r.section, r.text) for r in doc_rows]
+            )
+            await upsert_chunks([
+                (r.id, vec, {"project_id": project_id, "document_id": doc_id})
+                for r, vec in zip(doc_rows, vectors)
+            ])
+            await session.execute(
+                update(Chunk).where(Chunk.id.in_([r.id for r in doc_rows]))
+                .values(embedded=True)
+            )
+            # COMMIT PER DOCUMENT. This repair is the recovery path for chunks a
+            # previous failure left cold, so it is precisely the code most likely
+            # to meet the condition it repairs. Committing only at the end meant
+            # one slow document discarded every document already embedded — a
+            # 821-chunk reindex died twice and left the count at 821 both times,
+            # having done the work and thrown it away. Per-document commits make
+            # the repair monotonic: progress survives, and a re-run resumes
+            # instead of restarting.
+            await session.commit()
+            repaired += len(doc_rows)
+        except Exception:
+            # One unreadable document must not abandon the rest. It stays cold
+            # and is retried by the next reindex, which is the honest outcome —
+            # a cold chunk is visible in the dashboard as such.
+            await session.rollback()
+            logger.warning("reindex failed for a document; leaving it cold",
+                           extra={"document_id": doc_id, "chunks": len(doc_rows)})
+    return repaired

@@ -26,8 +26,15 @@ RUN pip install --upgrade pip \
 # Source changes now rebuild only these cheap layers.
 COPY app ./app
 COPY evals ./evals
+# Migration tooling — shipped so `alembic upgrade head` can run in the container.
+COPY alembic.ini ./
+COPY alembic ./alembic
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
 
 EXPOSE 8000
 
+# Entrypoint optionally runs migrations (RUN_MIGRATIONS=1) before the CMD.
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # Default command runs the API; the worker overrides CMD (see docker-compose).
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

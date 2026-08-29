@@ -42,10 +42,19 @@ retry_external = retry(
 
 # LLM provider calls: fewer attempts here because the router has its own
 # provider-fallback layer above this; double-retrying multiplies latency.
+#
+# THE RETRY BUDGET MUST FIT INSIDE THE ROUTER'S CEILING. It did not: 3 attempts
+# x a 120s read timeout, with backoff up to 45s, is a >400s budget sitting under
+# `router._CALL_TIMEOUT = 150`. On a hanging provider the outer ceiling always
+# fired mid-retry, so every attempt after the first was work that COULD NOT
+# finish — the run paid a full 150s per provider to learn nothing, and a
+# calibration run lost two whole sections to exactly that. Sized now so the
+# worst case (65 + 10 + 65 = 140s) completes inside the ceiling and the router
+# fails over on a real verdict rather than on a stopwatch.
 retry_llm = retry(
     retry=retry_if_exception(_is_retryable_http),
-    wait=wait_random_exponential(multiplier=2, max=45),
-    stop=stop_after_attempt(3),
+    wait=wait_random_exponential(multiplier=1, max=10),
+    stop=stop_after_attempt(2),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )

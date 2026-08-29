@@ -1,0 +1,54 @@
+{
+  "description": "Golden set for the REPORT pipeline (not just chat). A fixed corpus + a set of report sections: most are answerable from the corpus, at least one is deliberately unanswerable (its evidence is absent) and MUST become an honest labeled gap, never a fabricated claim. run_report_evals.py drives the real draft->gate->assemble path against this and asserts report-level grounding invariants.",
+  "query": "Verification and retrieval techniques for grounded generation",
+  "objective": "Summarize verification and retrieval techniques that keep generated answers grounded in sources.",
+  "field": "computer science",
+  "corpus": [
+    {
+      "doc_id": "r1",
+      "title": "Quote-grounded verification of generated claims",
+      "text": "# Quote-grounded verification\n\nWe require every generated claim to carry a verbatim quote from its cited source. A normalized exact-match check confirms the quote exists in the chunk before the claim is accepted. In our evaluation, quote-grounded verification eliminated fabricated citations entirely, reducing them from 9.4 per hundred claims to 0. The exact-match constraint is deterministic and cannot be satisfied by a paraphrase, which is why weak models become trustworthy under it."
+    },
+    {
+      "doc_id": "r2",
+      "title": "Natural language inference as an entailment gate",
+      "text": "# Entailment gating\n\nQuote presence alone is insufficient: a quote can be lifted out of context. We add a natural language inference stage that requires the cited chunk to entail the claim. Across 1,200 annotated pairs, the entailment gate caught 96% of out-of-context quotations that passed exact matching. Contradictory claims were rejected with a precision of 0.98. The NLI stage scores entailment, neutral, and contradiction, and rejects both contradiction and strongly-neutral pairs."
+    },
+    {
+      "doc_id": "r3",
+      "title": "Hybrid retrieval with reciprocal rank fusion",
+      "text": "# Hybrid retrieval\n\nDense embedding search and lexical BM25 retrieval capture complementary signals. We fuse their rankings with reciprocal rank fusion. On our benchmark, hybrid retrieval improved recall@10 by 18% over dense-only retrieval, and adding a cross-encoder re-ranker improved nDCG@10 by a further 4.2 points. The re-ranker scores relevance, not truth, and never decides whether a claim is supported."
+    },
+    {
+      "doc_id": "r4",
+      "title": "Closed-corpus grounding and honest gaps",
+      "text": "# Closed corpus\n\nA closed corpus restricts generation to a fixed set of ingested documents. When no ingested document supports a question, the system refuses and labels the gap rather than inventing an answer. In user studies, labeled refusals were rated more trustworthy than confident but unsupported answers by a margin of 31 percentage points."
+    }
+  ],
+  "sections": [
+    {
+      "heading": "Quote-grounded verification",
+      "sub_question": "How does requiring a verbatim quote per claim reduce fabricated citations?",
+      "guidance": "Mechanism and quantitative effect of exact quote matching.",
+      "answerable": true
+    },
+    {
+      "heading": "Entailment gating",
+      "sub_question": "What does an NLI entailment stage add beyond exact quote matching?",
+      "guidance": "Out-of-context detection, contradiction rejection, reported effectiveness.",
+      "answerable": true
+    },
+    {
+      "heading": "Hybrid retrieval",
+      "sub_question": "How does hybrid retrieval with rank fusion and re-ranking affect retrieval quality?",
+      "guidance": "Dense + lexical fusion, re-ranking, quantitative gains, role of the re-ranker.",
+      "answerable": true
+    },
+    {
+      "heading": "GPU kernel scheduling",
+      "sub_question": "What GPU kernel scheduling algorithm does the corpus recommend for training throughput?",
+      "guidance": "This is deliberately absent from the corpus; the section must be an honest gap.",
+      "answerable": false
+    }
+  ]
+}

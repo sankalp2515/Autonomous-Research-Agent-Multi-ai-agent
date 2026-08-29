@@ -2,6 +2,11 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alerting rules — evaluated every evaluation_interval. Alerts surface in the
+# Prometheus UI (/alerts) and, if an Alertmanager is wired, route onward.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
 scrape_configs:
   # Scrapes the API's /metrics (custom LLM / gate / pipeline series live here).
   # This stack is a SEPARATE compose project, so it reaches the API over the

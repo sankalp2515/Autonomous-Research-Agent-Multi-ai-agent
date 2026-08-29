@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "sqlalchemy[asyncio]>=2.0",
+    "alembic>=1.13",
     "asyncpg>=0.29",
     "redis>=5.0",
     "qdrant-client>=1.12,<1.13",
@@ -47,6 +48,19 @@ otel = [
 # client (Claude Desktop, other agents) call the verification gate + research.
 mcp = [
     "mcp>=1.2",
+]
+# LangSmith tracing (LANGSMITH_API_KEY set). LangGraph-native: node-level run
+# tree + our LLM calls, no code change beyond init_langsmith(). Optional.
+langsmith = [
+    "langsmith>=0.1",
+]
+# RAGAS offline second-opinion eval (python -m evals.run_ragas). Judge = Groq
+# (OpenAI-compatible), embeddings = local BGE. Needs the ml extra too.
+ragas = [
+    "ragas>=0.2",
+    "langchain-openai>=0.2",
+    "langchain-huggingface>=0.1",
+    "datasets>=2.19",
 ]
 dev = [
     "pytest>=8.2",

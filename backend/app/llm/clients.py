@@ -19,7 +19,11 @@ from app.core.retry import retry_llm
 
 logger = get_logger("llm.clients")
 
-_TIMEOUT = httpx.Timeout(connect=10, read=120, write=30, pool=10)
+# read=65 (was 120) so that TWO attempts plus backoff fit inside the router's
+# 150s per-provider ceiling — see the note on `retry_llm`. A completion that has
+# produced nothing in 65s is hung, not slow: the free fleet returns a 4096-token
+# draft well inside that, and failing over to another provider beats waiting.
+_TIMEOUT = httpx.Timeout(connect=10, read=65, write=30, pool=10)
 
 
 class LLMResult:
@@ -52,6 +56,10 @@ PROVIDERS: dict[str, ProviderSpec] = {
     "openrouter": ProviderSpec(
         "openrouter", "https://openrouter.ai/api/v1/chat/completions",
         "openrouter_api_key", "openrouter_model", "openrouter_rpm",
+    ),
+    "nvidia": ProviderSpec(
+        "nvidia", "https://integrate.api.nvidia.com/v1/chat/completions",
+        "nvidia_api_key", "nvidia_model", "nvidia_rpm",
     ),
 }
 

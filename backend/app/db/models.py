@@ -33,11 +33,70 @@ class TimestampMixin:
     )
 
 
+# ── Multi-tenancy: organizations, memberships, roles ─────────────────────────
+# Tenancy boundary is the ORG. Every project belongs to an org; a user reaches a
+# project through a Membership in that org, with a role. A user's first sign-in
+# gets a "personal" org (org of one) so single-user flows are unchanged.
+
+# Role ordering (higher = more power). Authorization checks compare against a
+# required minimum, so "admin" satisfies a "member"-or-above requirement.
+ROLE_RANK = {"viewer": 0, "member": 1, "admin": 2, "owner": 3}
+
+
+class Organization(TimestampMixin, Base):
+    __tablename__ = "organizations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200))
+    # A personal org (auto-created for one user) vs a real shared team org.
+    personal: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str] = mapped_column(String(64), index=True, default="local")
+
+
+class Membership(TimestampMixin, Base):
+    """A user's role within an org. (user_id, org_id) is unique."""
+    __tablename__ = "memberships"
+    __table_args__ = (
+        Index("ux_membership_user_org", "user_id", "org_id", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(String(32), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    role: Mapped[str] = mapped_column(String(16), default="member")  # see ROLE_RANK
+
+
+class UserProfile(TimestampMixin, Base):
+    """A directory row per user — populated from the auth token on sign-in, so
+    member/invite lists can show a real email + name instead of an opaque id."""
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), index=True, default="")
+    display_name: Mapped[str] = mapped_column(String(200), default="")
+
+
+class Invitation(TimestampMixin, Base):
+    """A pending invite to join an org by EMAIL. Accepted the next time the
+    invited email signs in (auto-matched), turning into a Membership."""
+    __tablename__ = "invitations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(String(32), index=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    role: Mapped[str] = mapped_column(String(16), default="member")
+    invited_by: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|accepted|revoked
+
+
 class Project(TimestampMixin, Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     owner_id: Mapped[str] = mapped_column(String(64), index=True, default="local")
+    # Tenancy: the org that owns this project. Nullable during rollout/backfill;
+    # a null org_id falls back to legacy owner_id checks (see api authz).
+    org_id: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
 
@@ -134,6 +193,10 @@ class Answer(TimestampMixin, Base):
     refused: Mapped[bool] = mapped_column(Boolean, default=False)
     refusal_reason: Mapped[str] = mapped_column(Text, default="")
     coverage_note: Mapped[str] = mapped_column(Text, default="")
+    # Which chat surface produced this: "corpus" (main Ask), "paper" (Ask this
+    # paper), or "selection" (chat-with-selection). History restore shows only
+    # "corpus" so scoped/one-off chats don't clutter the main conversation.
+    kind: Mapped[str] = mapped_column(String(16), default="corpus")
 
 
 class Claim(TimestampMixin, Base):
@@ -214,6 +277,20 @@ class SavedClaim(TimestampMixin, Base):
     project_id: Mapped[str] = mapped_column(String(32), index=True)
     claim_id: Mapped[str] = mapped_column(String(32), index=True)
     note: Mapped[str] = mapped_column(Text, default="")
+
+
+class ShareLink(TimestampMixin, Base):
+    """A public, read-only share token for a report. New table -> created by
+    init_db()'s create_all with no migration. The slug is the URL-shortening
+    layer: a short unguessable capability that maps /s/{slug} -> a report."""
+    __tablename__ = "share_links"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    slug: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    report_id: Mapped[str] = mapped_column(String(32), index=True)
+    project_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_by: Mapped[str] = mapped_column(String(64), default="local")
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Watch(TimestampMixin, Base):

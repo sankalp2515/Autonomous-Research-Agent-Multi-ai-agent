@@ -21,11 +21,24 @@ services:
     environment:
       LOG_FORMAT: console          # readable logs while developing
 
+  # The inference tier was the one service WITHOUT a source mount, so it kept
+  # running the baked image while api and worker picked up edits on restart —
+  # the exact stale-code trap this file exists to prevent, just one service
+  # further down. Symptom: model_server.py changes (thread pinning, startup
+  # warmup) appeared to do nothing, while compose-level env changes worked,
+  # because only the latter reach a baked image.
+  models:
+    volumes:
+      - ./backend/app:/app/app:ro
+    environment:
+      LOG_FORMAT: console
+
   worker:
     volumes:
       - ./backend/app:/app/app:ro
     environment:
       LOG_FORMAT: console
-      # TEMPORARY (verification): small corpus for a fast, clean diagnostic run.
-      # Remove to restore the real 28-paper default.
-      RESEARCH_MAX_PAPERS: "10"
+      # NOTE: RESEARCH_MAX_PAPERS was pinned to "10" here as a "temporary"
+      # diagnostic override and never removed — every run since was capped at a
+      # 10-paper corpus, which is most of why reports read thin. Removed; the
+      # app default (config.research_max_papers) is authoritative again.

@@ -35,8 +35,15 @@ def get_engine():
 
 
 async def init_db(*, attempts: int = 10, delay: float = 2.0) -> None:
-    """Create tables if absent. For Supabase, the same DDL applies via
-    DATABASE_URL; migrations graduate to Alembic when the schema stabilizes.
+    """Ensure the database is reachable and (in dev) the schema exists.
+
+    Schema ownership is governed by settings.db_auto_create:
+      * True  (dev/test default): create_all bootstraps the schema in-process.
+      * False (production):        Alembic owns the schema — `alembic upgrade
+                                   head` runs in the deploy step and init_db
+                                   only verifies connectivity + hot indexes,
+                                   never running create_all against a
+                                   migration-managed database.
 
     Retries on startup: containers (or Supabase) may not accept connections
     the instant a worker/API boots. A transient refusal must not kill the
@@ -44,14 +51,20 @@ async def init_db(*, attempts: int = 10, delay: float = 2.0) -> None:
     """
     import asyncio
 
+    settings = get_settings()
     engine = get_engine()
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
             async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+                if settings.db_auto_create:
+                    await conn.run_sync(Base.metadata.create_all)
+                else:
+                    from sqlalchemy import text
+                    await conn.execute(text("SELECT 1"))  # connectivity only
                 await _ensure_indexes(conn)
-            logger.info("database schema ensured")
+            logger.info("database schema ensured",
+                        extra={"managed_by": "create_all" if settings.db_auto_create else "alembic"})
             return
         except Exception as exc:  # connection refused, DB starting, etc.
             last_exc = exc

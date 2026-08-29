@@ -46,9 +46,6 @@ INGEST_DOCS = Counter(
 )
 
 
-RATE_LIMIT_PER_MIN = 150  # per-IP API request budget per minute
-
-
 def _consteq(a: str, b: str) -> bool:
     """Constant-time comparison to avoid leaking the token via timing."""
     import hmac
@@ -96,7 +93,13 @@ def install_observability(app: FastAPI) -> None:
         (so one user can't multiply their budget by rotating IPs, and shared
         NAT/proxy IPs don't throttle each other) falling back to client IP.
         Expensive endpoints get a tighter budget. Fail-open if Redis is down."""
-        if request.url.path.startswith("/api/"):
+        # Exempt long-lived / high-frequency reads: the SSE + WS status streams
+        # are ONE persistent connection (not spam), and status polling is
+        # expected. Counting them made normal single-user use hit 429 and broke
+        # the completion WebSocket + chat mid-flight.
+        _p = request.url.path
+        _exempt = _p.startswith("/api/status/") or _p.startswith("/api/health")
+        if _p.startswith("/api/") and not _exempt:
             try:
                 from app.core.config import get_settings
                 from app.stores.redis_store import get_redis
@@ -115,7 +118,8 @@ def install_observability(app: FastAPI) -> None:
                 # Tighter bucket for the expensive pipeline launch.
                 expensive = (request.method == "POST"
                              and request.url.path.rstrip("/").endswith("/pipeline"))
-                limit = settings.pipeline_rate_limit_per_min if expensive else RATE_LIMIT_PER_MIN
+                limit = (settings.pipeline_rate_limit_per_min if expensive
+                         else settings.rate_limit_per_min)
                 bucket = "pipe" if expensive else "api"
 
                 window = int(time.time() // 60)

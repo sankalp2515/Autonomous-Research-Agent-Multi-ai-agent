@@ -1,0 +1,53 @@
+# Production override — run the images CI BUILT, never a rebuild on the host.
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml \
+#     --profile app pull
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml \
+#     --profile app up -d
+#
+# The base file builds from source, which is right for a laptop and wrong for a
+# deploy: a host rebuild means the artifact serving users is not the artifact the
+# gates passed. This file replaces every `build:` with a pinned GHCR tag.
+#
+# IMAGE_TAG defaults to `latest` but the release job passes the commit SHA, so a
+# deploy is pinned to one immutable build and a rollback is the previous SHA.
+# GHCR_REPO is `ghcr.io/<owner>/<repo>` (lowercased by the release job).
+#
+# Requires Compose v2.24+ for the `!reset` tag, which deletes the base file's
+# `build:` so the host physically cannot rebuild instead of pulling.
+
+services:
+  api:
+    image: ${GHCR_REPO}/backend:${IMAGE_TAG:-latest}
+    build: !reset null
+    environment:
+      # Alembic is the single source of truth for the schema in production, and
+      # this is the ONE service that applies it (see docs/MIGRATIONS.md). The
+      # worker must never also run migrations — two concurrent `upgrade head`
+      # calls race on the same version table.
+      RUN_MIGRATIONS: "1"
+      DB_AUTO_CREATE: "false"
+      AUTH_DISABLED: "${AUTH_DISABLED:-false}"
+    restart: unless-stopped
+
+  worker:
+    image: ${GHCR_REPO}/backend:${IMAGE_TAG:-latest}
+    build: !reset null
+    environment:
+      RUN_MIGRATIONS: "0"
+      DB_AUTO_CREATE: "false"
+    restart: unless-stopped
+
+  frontend:
+    image: ${GHCR_REPO}/frontend:${IMAGE_TAG:-latest}
+    build: !reset null
+    restart: unless-stopped
+
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
+  qdrant:
+    restart: unless-stopped

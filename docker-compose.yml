@@ -62,6 +62,10 @@ services:
       # AUTH_DISABLED=false in a root .env (with VITE_SUPABASE_* build args) to
       # turn sign-in on. `environment` wins over env_file, so this is the knob.
       AUTH_DISABLED: "${AUTH_DISABLED:-true}"
+      # Phase 2: point at the separate model tier to take inference off the API's
+      # hot path. Empty (default) = in-process. Enable with the `models` profile
+      # and set INFERENCE_SERVICE_URL=http://models:8100 in a root .env.
+      INFERENCE_SERVICE_URL: "${INFERENCE_SERVICE_URL:-}"
       # Traces flow here when OTEL_ENABLED=true (set in backend/.env) and the
       # observability profile is up. Harmless no-op otherwise.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
@@ -107,6 +111,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
       OTEL_SERVICE_NAME: veriscope-worker
+      INFERENCE_SERVICE_URL: "${INFERENCE_SERVICE_URL:-}"
       # Model cache + authenticated, bounded downloads (see api service above).
       HF_HOME: /models
       HF_HUB_DOWNLOAD_TIMEOUT: "30"
@@ -116,6 +121,48 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       qdrant: { condition: service_healthy }
+
+  # ── Model tier (Phase 2, opt-in: `docker compose --profile models up`) ──────
+  # Serves embeddings / rerank / NLI so inference scales independently of the API
+  # and is off the API's request-path lock. Point api+worker at it by setting
+  # INFERENCE_SERVICE_URL=http://models:8100 in a root .env. Scale it on its own:
+  # `... --profile app --profile models up --scale models=3`.
+  models:
+    profiles: ["models"]
+    build: ./backend
+    # PID 1 here is uvicorn, which does not reap children. The healthcheck
+    # spawns a python process every 15s, and under load those finished but were
+    # never collected — 9 stray entries were observed in /proc, and the
+    # container eventually could not be stopped at all ("PID is zombie and can
+    # not be killed"), needing a force-remove. An init process reaps them.
+    init: true
+    command: ["uvicorn", "app.model_server:app", "--host", "0.0.0.0", "--port", "8100"]
+    env_file: ./backend/.env
+    environment:
+      # MUST be empty here — this IS the inference tier (the server refuses to
+      # boot otherwise, to prevent proxy-to-self recursion).
+      INFERENCE_SERVICE_URL: ""
+      HF_HOME: /models
+      HF_HUB_DOWNLOAD_TIMEOUT: "30"
+      # Thread pinning — set HERE as well as in code because OpenMP reads its
+      # pool size at library-init, before any Python in model_server.py runs.
+      # Unpinned, torch took a thread per core PER concurrent request: PID 1 was
+      # seen with 73 threads at 1621% CPU on an 8-core host, and embed calls
+      # blew through the client's 120s timeout — which is how a real run ended
+      # with 73% of its chunks unembedded and retrieval silently degraded to
+      # BM25. Keep these two in step with INFERENCE_THREADS.
+      OMP_NUM_THREADS: "${INFERENCE_THREADS:-7}"
+      MKL_NUM_THREADS: "${INFERENCE_THREADS:-7}"
+      INFERENCE_THREADS: "${INFERENCE_THREADS:-7}"
+    volumes:
+      - hf_cache:/models
+    ports:
+      - "${MODELS_PORT:-8100}:8100"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8100/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
 # NOTE: the observability stack (Prometheus/Grafana/Loki/Tempo/Promtail) lives
 # in its OWN compose file — docker-compose.observability.yml — deliberately.

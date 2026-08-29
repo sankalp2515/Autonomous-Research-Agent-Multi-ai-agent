@@ -1,14 +1,18 @@
 import { FormEvent, useState } from "react";
-import { signIn, signInWithGoogle, signUp } from "../auth";
+import { resetPassword, signIn, signInWithGoogle, signUp } from "../auth";
 import { Spinner } from "./ui";
 
+type Mode = "in" | "up" | "reset";
+
 export default function Login() {
-  const [mode, setMode] = useState<"in" | "up">("in");
+  const [mode, setMode] = useState<Mode>("in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+
+  function switchMode(m: Mode) { setMode(m); setErr(""); setMsg(""); }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -19,17 +23,29 @@ export default function Login() {
     try {
       if (mode === "in") {
         await signIn(email.trim(), password);
-      } else {
+      } else if (mode === "up") {
         await signUp(email.trim(), password);
-        setMsg("Account created. Check your email to confirm, then sign in.");
+        // Supabase does not reveal whether an address already exists, so we
+        // phrase this to be correct in both cases rather than promising a new
+        // account was created.
+        setMsg("Check your email to confirm your address, then sign in. If you already have an account, sign in instead.");
         setMode("in");
+      } else {
+        await resetPassword(email.trim());
+        setMsg("If that email has an account, a password-reset link is on its way.");
       }
     } catch (e: any) {
-      setErr(e.message ?? String(e));
+      setErr(friendly(e?.message ?? String(e)));
     } finally {
       setBusy(false);
     }
   }
+
+  const cta = mode === "in" ? "Sign in" : mode === "up" ? "Create account" : "Send reset link";
+  const subtitle =
+    mode === "in" ? "Sign in to your research workspace."
+    : mode === "up" ? "Create an account."
+    : "We’ll email you a link to set a new password.";
 
   return (
     <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", width: "100%" }}>
@@ -45,39 +61,75 @@ export default function Login() {
           </h1>
         </div>
         <p style={{ color: "var(--text-2)", fontSize: 13, margin: "0 0 18px" }}>
-          {mode === "in" ? "Sign in to your research workspace." : "Create an account."}
+          {subtitle}
         </p>
-        <button type="button" className="btn btn-ghost google-btn"
-                onClick={() => signInWithGoogle().catch((e) => setErr(e.message ?? String(e)))}>
-          <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
-            <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.6 2.4 30.1 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.2 17.7 9.5 24 9.5z"/>
-            <path fill="#4285F4" d="M46.1 24.6c0-1.6-.1-3.1-.4-4.6H24v9.1h12.4c-.5 2.9-2.1 5.3-4.6 7l7.1 5.5c4.2-3.9 6.6-9.6 6.6-17z"/>
-            <path fill="#FBBC05" d="M10.5 28.3c-.5-1.5-.8-3-.8-4.8s.3-3.3.8-4.8l-7.9-6.1C.9 16.1 0 19.9 0 23.5s.9 7.4 2.6 10.9l7.9-6.1z"/>
-            <path fill="#34A853" d="M24 47c6.1 0 11.3-2 15-5.5l-7.1-5.5c-2 1.3-4.6 2.1-7.9 2.1-6.3 0-11.6-3.7-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 47 24 47z"/>
-          </svg>
-          Continue with Google
-        </button>
-        <div className="login-or"><span>or</span></div>
+        {mode !== "reset" && (
+          <>
+            <button type="button" className="btn btn-ghost google-btn"
+                    onClick={() => signInWithGoogle().catch((e) => setErr(e.message ?? String(e)))}>
+              <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
+                <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.6 2.4 30.1 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.2 17.7 9.5 24 9.5z"/>
+                <path fill="#4285F4" d="M46.1 24.6c0-1.6-.1-3.1-.4-4.6H24v9.1h12.4c-.5 2.9-2.1 5.3-4.6 7l7.1 5.5c4.2-3.9 6.6-9.6 6.6-17z"/>
+                <path fill="#FBBC05" d="M10.5 28.3c-.5-1.5-.8-3-.8-4.8s.3-3.3.8-4.8l-7.9-6.1C.9 16.1 0 19.9 0 23.5s.9 7.4 2.6 10.9l7.9-6.1z"/>
+                <path fill="#34A853" d="M24 47c6.1 0 11.3-2 15-5.5l-7.1-5.5c-2 1.3-4.6 2.1-7.9 2.1-6.3 0-11.6-3.7-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 47 24 47z"/>
+              </svg>
+              Continue with Google
+            </button>
+            <div className="login-or"><span>or</span></div>
+          </>
+        )}
         <form onSubmit={submit}>
-          <input className="input" type="email" placeholder="you@email.com" required
+          <input className="input" type="email" placeholder="you@email.com" required autoComplete="email"
                  value={email} onChange={(e) => setEmail(e.target.value)}
                  style={{ marginBottom: 10 }} />
-          <input className="input" type="password" placeholder="Password" required minLength={6}
-                 value={password} onChange={(e) => setPassword(e.target.value)}
-                 style={{ marginBottom: 14 }} />
+          {mode !== "reset" && (
+            <input className="input" type="password" placeholder="Password" required minLength={6}
+                   autoComplete={mode === "in" ? "current-password" : "new-password"}
+                   value={password} onChange={(e) => setPassword(e.target.value)}
+                   style={{ marginBottom: mode === "in" ? 6 : 14 }} />
+          )}
+          {mode === "in" && (
+            <div style={{ textAlign: "right", marginBottom: 12 }}>
+              <button type="button" onClick={() => switchMode("reset")}
+                      style={{ background: "none", border: "none", color: "var(--primary-deep)",
+                               fontSize: 12, cursor: "pointer", padding: 0 }}>
+                Forgot password?
+              </button>
+            </div>
+          )}
           <button className="btn" style={{ width: "100%", justifyContent: "center" }}
                   disabled={busy}>
-            {busy ? <Spinner /> : mode === "in" ? "Sign in" : "Create account"}
+            {busy ? <Spinner /> : cta}
           </button>
         </form>
         {err && <p style={{ color: "var(--bad)", fontSize: 12.5, marginBottom: 0 }}>{err}</p>}
         {msg && <p style={{ color: "var(--ok)", fontSize: 12.5, marginBottom: 0 }}>{msg}</p>}
-        <button onClick={() => { setMode(mode === "in" ? "up" : "in"); setErr(""); }}
-                style={{ background: "none", border: "none", color: "var(--primary-deep)",
-                         fontSize: 12.5, marginTop: 14, cursor: "pointer", padding: 0 }}>
-          {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
-        </button>
+        {mode === "reset" ? (
+          <button onClick={() => switchMode("in")}
+                  style={{ background: "none", border: "none", color: "var(--primary-deep)",
+                           fontSize: 12.5, marginTop: 14, cursor: "pointer", padding: 0 }}>
+            ← Back to sign in
+          </button>
+        ) : (
+          <button onClick={() => switchMode(mode === "in" ? "up" : "in")}
+                  style={{ background: "none", border: "none", color: "var(--primary-deep)",
+                           fontSize: 12.5, marginTop: 14, cursor: "pointer", padding: 0 }}>
+            {mode === "in" ? "Need an account? Sign up" : "Have an account? Sign in"}
+          </button>
+        )}
       </div>
     </div>
   );
+}
+
+// Map the handful of raw Supabase error strings users actually hit to plain
+// language. Anything unrecognized passes through unchanged.
+function friendly(raw: string): string {
+  const s = raw.toLowerCase();
+  if (s.includes("invalid login")) return "That email or password doesn’t match. Try again, or reset your password.";
+  if (s.includes("email not confirmed")) return "Please confirm your email first — check your inbox for the link.";
+  if (s.includes("rate limit") || s.includes("too many")) return "Too many attempts. Wait a minute and try again.";
+  if (s.includes("password should be")) return "Password must be at least 6 characters.";
+  if (s.includes("user already registered")) return "An account with this email already exists — sign in instead.";
+  return raw;
 }

@@ -61,18 +61,28 @@ async def upsert_chunks(
 
 
 async def search(
-    vector: list[float], project_id: str, limit: int = 20
+    vector: list[float], project_id: str, limit: int = 20,
+    document_ids: list[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Returns (chunk_id, score), restricted to one project's corpus -
-    the closed-corpus guarantee is enforced here at the store level."""
+    the closed-corpus guarantee is enforced here at the store level.
+
+    `document_ids` narrows the ANN search to specific documents IN THE STORE.
+    Without it, a per-document caller had to search the whole project and then
+    discard everything that wasn't its document — so for a 60-chunk paper inside
+    a 44k-chunk corpus, dense retrieval contributed almost nothing and per-paper
+    reading silently degraded to lexical-only. Pushing the filter down to Qdrant
+    means the ANN budget is spent INSIDE the document."""
     settings = get_settings()
+    must = [qm.FieldCondition(key="project_id", match=qm.MatchValue(value=project_id))]
+    if document_ids:
+        must.append(qm.FieldCondition(
+            key="document_id", match=qm.MatchAny(any=list(document_ids))))
     hits = await get_qdrant().search(
         collection_name=settings.qdrant_collection,
         query_vector=vector,
         limit=limit,
-        query_filter=qm.Filter(
-            must=[qm.FieldCondition(key="project_id", match=qm.MatchValue(value=project_id))]
-        ),
+        query_filter=qm.Filter(must=must),
     )
     return [(h.payload["chunk_id"], h.score) for h in hits if h.payload]
 

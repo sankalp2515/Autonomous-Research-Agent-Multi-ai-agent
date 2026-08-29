@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /$
+Allow: /index.html
+# Public shared reports are capability-gated by an unguessable slug; keep them
+# out of crawlers so private research isn't indexed by accident.
+Disallow: /#/s/

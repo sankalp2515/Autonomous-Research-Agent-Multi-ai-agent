@@ -25,8 +25,9 @@
 - [TL;DR](#tldr)
 - [The problem](#the-problem)
 - [Core guarantees](#core-guarantees)
-- [Demo](#demo)
+<!-- - [Demo](#demo) -->
 - [Features](#features)
+- [Architecture at a glance](#architecture-at-a-glance)
 - [Architecture &amp; key decisions](#architecture--key-decisions)
 - [Tech stack](#tech-stack)
 - [Quick start (local)](#quick-start-local)
@@ -75,7 +76,7 @@ The pattern is always **plausible at first glance, wrong on verification** — s
 | G4 | Refusal over fabrication | "Your corpus doesn't cover this" is a first-class answer |
 | G5 | Honest gaps | Unsupported sections are labelled, never papered over |
 
-## Demo
+<!-- ## Demo
 
 > Add a short screen recording and a few stills, then reference them here:
 >
@@ -86,7 +87,7 @@ The pattern is always **plausible at first glance, wrong on verification** — s
 >
 > **How to make the GIF (free):** record with [ScreenToGif](https://www.screentogif.com/) (Windows) or [Kap](https://getkap.co/) (macOS) → capture the flow *ask a question → live progress → report with click-to-quote → Map* → export at ≤ 12 fps, ≤ 1000 px wide to keep it under ~8 MB so GitHub renders it inline.
 
-<p align="center"><img src="docs/demo.gif" alt="Veriscope demo" width="760"></p>
+<p align="center"><img src="docs/demo.gif" alt="Veriscope demo" width="760"></p> -->
 
 ## Features
 
@@ -106,6 +107,21 @@ The pattern is always **plausible at first glance, wrong on verification** — s
 - **Standing monitor agent** — watches your questions, re-checks arXiv/Semantic Scholar for new papers, scores + surfaces them.
 - **Live SSE progress**, device-local PDF library, BibTeX import, tiered retention, Supabase auth, security headers + rate limiting, a CI-gated **groundedness eval harness**.
 
+## Architecture at a glance
+
+The whole system, traced from the HTTP entry point — entry path, LangGraph
+orchestrator, the six-stage RAG pipeline, the verification gate, all six kinds
+of memory, and the platform underneath.
+
+<p align="center">
+  <img src="docs/architecture-flow.svg" alt="Veriscope architecture flow — FastAPI entry point, Redis queue, LangGraph pipeline, RAG retrieval, verification gate, memory tiers and storage" width="100%">
+</p>
+
+> Also available as an editable board: [`docs/architecture-board.mmd`](docs/architecture-board.mmd)
+> imports straight into **FigJam** and **Miro**, and
+> [`scripts/build_miro_board.py`](scripts/build_miro_board.py) builds the native
+> Miro version via the REST API. See [docs/ARCHITECTURE_VISUALS.md](docs/ARCHITECTURE_VISUALS.md).
+
 ## Architecture &amp; key decisions
 
 ```
@@ -116,7 +132,8 @@ The pattern is always **plausible at first glance, wrong on verification** — s
                     ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  Worker(s)  ──▶  LangGraph pipeline / monitor / import jobs   │
-│   clarify→plan→research∥→ingest→outline→draft+GATE⇄replan→…   │
+│   clarify→plan→evidence_schema→research→extract_evidence→     │
+│   report_architect→draft_sections+GATE⇄replan→assemble→graph  │
 └──────────────────────────────────────────────────────────────┘
    │ Postgres (truth)   │ Qdrant (vectors)   │ Redis (queue/cache)
 ```

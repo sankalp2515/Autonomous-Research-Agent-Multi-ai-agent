@@ -9,6 +9,7 @@ export default defineConfig({
       "/api": {
         target: process.env.VITE_API_TARGET ?? "http://localhost:8210",
         changeOrigin: true,
+        ws: true, // proxy the run-status WebSocket in local dev too
       },
     },
   },

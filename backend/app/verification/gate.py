@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.core.config import get_settings
+from app.core.exceptions import VerificationUnavailable
 from app.core.logging import get_logger
 from app.core.observability import GATE_CLAIMS
 from app.ml.local_models import (
@@ -22,6 +23,22 @@ from app.ml.local_models import (
 from app.verification.quote_match import match_quote, QuoteMatch
 
 logger = get_logger("gate")
+
+
+def assert_verification_ready() -> None:
+    """Startup fail-fast: refuse to boot an environment that REQUIRES the NLI
+    truth layer but has it switched off. Called from both entry points (API and
+    worker) so a misconfigured deployment dies loudly at boot instead of shipping
+    quote-only 'verified' claims at run time. The gate itself (below) is the hard
+    backstop; this is the friendly early warning."""
+    settings = get_settings()
+    if settings.nli_required and not settings.ml_nli_enabled:
+        raise RuntimeError(
+            "ML_NLI_ENABLED=false is not permitted when APP_ENV=prod — the "
+            "verification gate would ship claims on quote-match alone, silently "
+            "dropping the NLI entailment (out-of-context) check. Enable the local "
+            "ML stack (pip install .[ml], ML_NLI_ENABLED=true) before starting."
+        )
 
 
 @dataclass
@@ -69,6 +86,17 @@ _UBIQUITOUS_ACRONYMS = {
 }
 
 
+def _trim_edges(tok: str) -> str:
+    """Drop punctuation the word regex swallowed at the edges.
+
+    `.` and `'` are allowed INSIDE a token so "Gemini-2.5-Flash" and "v2.0"
+    survive intact — but a trailing one belongs to the sentence, not the name.
+    Left unstripped, "Logical Contradiction." and "Compliance Regime'" were
+    looked up with their punctuation attached and never matched.
+    """
+    return tok.strip(".,;:!?'’\"()[]{}")
+
+
 def _has_possessive(tok: str) -> bool:
     return tok.endswith("'s") or tok.endswith("’s")
 
@@ -82,26 +110,49 @@ def _extract_entities(text: str) -> list[str]:
     and standalone acronyms (>=3 chars, not ubiquitous). Possessives terminate
     a run so "IBM's AI Fairness 360" yields IBM and "AI Fairness", not a merged
     phantom. Single Title-case words (often just sentence starts) are ignored."""
-    toks = [(_strip_possessive(t), _has_possessive(t)) for t in _WORD_RE.findall(text)]
+    # Tokens WITH positions, so a run can be stopped by punctuation. Without
+    # this the run walker treated "(PK, CK, RPK)" as one name "PK CK RPK", and
+    # "Mechanistic Hallucination Mitigation (MHM)" as "Mechanistic Hallucination
+    # Mitigation MHM" — glued strings that appear in no source, so every claim
+    # naming a system alongside its acronym was rejected as over-specified.
+    # Measured on a real run, this was 10 of 17 refusals: true, supported
+    # findings thrown away by a tokenizer artifact.
+    matches = list(_WORD_RE.finditer(text))
+    toks = [(_strip_possessive(_trim_edges(m.group(0))), _has_possessive(m.group(0)),
+             m.start(), m.end()) for m in matches]
+    toks = [t for t in toks if t[0]]
+
+    def _joined_by_space_only(prev_end: int, next_start: int) -> bool:
+        """True when only whitespace separates two tokens. A comma, bracket,
+        quote or full stop between them means they are separate references."""
+        return text[prev_end:next_start].strip() == ""
+
     ents: list[str] = []
     i, n = 0, len(toks)
     while i < n:
-        word, poss = toks[i]
+        word, poss, _ws, wend = toks[i]
         if not (word[:1].isupper()):
             i += 1
             continue
         run = [word]
+        prev_end = wend
         j = i + 1
         if not poss:  # a possessive ends the run right here
             while j < n:
-                nxt, nxt_poss = toks[j]
+                nxt, nxt_poss, nstart, nend = toks[j]
+                if not _joined_by_space_only(prev_end, nstart):
+                    break
                 if nxt[:1].isupper():
                     run.append(nxt)
+                    prev_end = nend
                     j += 1
                     if nxt_poss:
                         break
-                elif nxt.lower() in _RUN_CONNECTORS and j + 1 < n and toks[j + 1][0][:1].isupper():
+                elif (nxt.lower() in _RUN_CONNECTORS and j + 1 < n
+                      and toks[j + 1][0][:1].isupper()
+                      and _joined_by_space_only(nend, toks[j + 1][2])):
                     run.append(nxt)
+                    prev_end = nend
                     j += 1
                 else:
                     break
@@ -135,11 +186,21 @@ def unsupported_entities(claim_text: str, chunk_text: str) -> list[str]:
     chunk_norm = _norm(chunk_text)
     missing: list[str] = []
     seen: set[str] = set()
+
+    def _acronym_in_chunk(ent: str) -> bool:
+        """A source that introduces a name once and then uses the short form for
+        the rest of the paper still supports the claim. Hyphenated compounds
+        contribute each initial — "Context-Driven Decomposition" is CDD, not CD,
+        and deriving the wrong one made this fallback miss exactly the systems
+        papers abbreviate most."""
+        for parts in (ent.replace("-", " ").split(), ent.split()):
+            acronym = "".join(w[0] for w in parts if w[:1].isupper()).lower()
+            if len(acronym) >= 2 and re.search(rf"\b{re.escape(acronym)}\b", chunk_norm):
+                return True
+        return False
+
     for ent in _extract_entities(claim_text):
-        if _norm(ent) in chunk_norm:
-            continue
-        acronym = "".join(w[0] for w in ent.split() if w[:1].isupper()).lower()
-        if len(acronym) >= 2 and re.search(rf"\b{re.escape(acronym)}\b", chunk_norm):
+        if _norm(ent) in chunk_norm or _acronym_in_chunk(ent):
             continue
         key = ent.lower()
         if key not in seen:
@@ -168,6 +229,16 @@ class GateReport:
 async def verify_claim(claim: ClaimInput, chunk_text: str | None) -> GateResult:
     settings = get_settings()
 
+    # Fail closed: where NLI is required, refuse to verify at all if the truth
+    # layer is switched off — a quote-only pass would silently drop the
+    # out-of-context check. Raise (loud, diagnosable) rather than return a
+    # half-verified result.
+    if settings.nli_required and not nli_available():
+        raise VerificationUnavailable(
+            "NLI entailment is required in this environment but ML_NLI_ENABLED "
+            "is off — refusing to verify on quote-match alone."
+        )
+
     # Layer 1: citation resolution.
     if chunk_text is None:
         GATE_CLAIMS.labels("failed_citation").inc()
@@ -194,13 +265,21 @@ async def verify_claim(claim: ClaimInput, chunk_text: str | None) -> GateResult:
     # Layer 3: entailment (quote context, not just quote presence).
     if nli_available():
         label, score = await nli_entailment(chunk_text, claim.text)
+        # Flag is on but the model was not operational (import/load failed): it
+        # returns "skipped". Where NLI is required, that is a broken truth layer,
+        # not a pass — fail closed instead of quietly waving the claim through.
+        if settings.nli_required and label == "skipped":
+            raise VerificationUnavailable(
+                "NLI model returned no judgment (not operational) but entailment "
+                "is required in this environment."
+            )
         evidence.nli_label, evidence.nli_score = label, score
         if label == "contradiction" and score >= settings.nli_contradiction_threshold:
             GATE_CLAIMS.labels("failed_nli").inc()
             logger.info("gate: contradiction",
                         extra={"chunk_id": claim.chunk_id, "score": round(score, 3)})
             return GateResult(False, "nli_contradiction", evidence)
-        if label == "neutral" and score >= 0.85:
+        if label == "neutral" and score >= settings.nli_neutral_reject_threshold:
             # Strongly neutral = the chunk says nothing about this claim,
             # despite a matching quote. Out-of-context quoting; fail it.
             GATE_CLAIMS.labels("failed_nli").inc()
@@ -211,14 +290,14 @@ async def verify_claim(claim: ClaimInput, chunk_text: str | None) -> GateResult:
 
 
 def _apply_nli(evidence: EvidenceResult, label: str, score: float,
-               contradiction_threshold: float) -> GateResult:
+               contradiction_threshold: float, neutral_threshold: float) -> GateResult:
     """Layer-3 decision, shared by the single and batched paths so they can
     never diverge."""
     evidence.nli_label, evidence.nli_score = label, score
     if label == "contradiction" and score >= contradiction_threshold:
         GATE_CLAIMS.labels("failed_nli").inc()
         return GateResult(False, "nli_contradiction", evidence)
-    if label == "neutral" and score >= 0.85:
+    if label == "neutral" and score >= neutral_threshold:
         GATE_CLAIMS.labels("failed_nli").inc()
         return GateResult(False, "nli_weak", evidence)
     GATE_CLAIMS.labels("verified").inc()
@@ -233,6 +312,16 @@ async def verify_claims(
     forward pass, instead of one serialized model call per claim. Decisions are
     identical to verify_claim — only the inference is coalesced."""
     settings = get_settings()
+
+    # Fail closed (see verify_claim): a required-but-off NLI layer must never
+    # let claims through on quote-match alone. Checked once up front for the
+    # whole batch.
+    if settings.nli_required and not nli_available():
+        raise VerificationUnavailable(
+            "NLI entailment is required in this environment but ML_NLI_ENABLED "
+            "is off — refusing to verify on quote-match alone."
+        )
+
     report = GateReport()
     results: list[GateResult | None] = [None] * len(claims)
     nli_jobs: list[tuple[int, str, str, EvidenceResult]] = []
@@ -247,9 +336,38 @@ async def verify_claims(
                          fuzzy_threshold=settings.quote_fuzzy_threshold)  # layer 2
         evidence = EvidenceResult(claim.chunk_id, claim.quote, qm)
         if not qm.ok:
-            GATE_CLAIMS.labels("failed_quote").inc()
-            results[i] = GateResult(False, "quote_mismatch", evidence)
-            continue
+            # MIS-ATTRIBUTION, not fabrication. A frequent failure is a quote
+            # that IS verbatim in the sources the model was shown, but carries a
+            # neighbouring block's chunk_id — the passages arrive as one prompt
+            # and the id gets crossed. Rejecting that discards a true, properly
+            # sourced finding over a bookkeeping slip.
+            #
+            # So: look for the quote in the other passages of THIS drafting
+            # context. If exactly one contains it, the citation is corrected to
+            # point there and verification continues. The contract is unchanged
+            # and arguably tightened — the claim still needs a verbatim span in
+            # a real corpus chunk, and the citation the reader clicks now
+            # actually contains it. Ambiguity (two chunks match) stays a
+            # refusal: we will not guess which source to credit.
+            owners = [
+                cid for cid, text in chunk_lookup.items()
+                if cid != claim.chunk_id
+                and match_quote(claim.quote, text,
+                                fuzzy_threshold=settings.quote_fuzzy_threshold).ok
+            ]
+            if len(owners) == 1:
+                chunk_text = chunk_lookup[owners[0]]
+                qm = match_quote(claim.quote, chunk_text,
+                                 fuzzy_threshold=settings.quote_fuzzy_threshold)
+                evidence = EvidenceResult(owners[0], claim.quote, qm)
+                GATE_CLAIMS.labels("reattributed").inc()
+                logger.info("gate: citation re-attributed to the chunk that "
+                            "actually contains the quote",
+                            extra={"from": claim.chunk_id, "to": owners[0]})
+            else:
+                GATE_CLAIMS.labels("failed_quote").inc()
+                results[i] = GateResult(False, "quote_mismatch", evidence)
+                continue
         if settings.gate_entity_check_enabled and unsupported_entities(claim.text, chunk_text):
             GATE_CLAIMS.labels("failed_entity").inc()
             results[i] = GateResult(False, "unsupported_entity", evidence)
@@ -263,8 +381,16 @@ async def verify_claims(
     if nli_jobs:  # layer 3, batched
         scored = await nli_entailment_batch([(p, h) for _, p, h, _ in nli_jobs])
         for (i, _p, _h, evidence), (label, score) in zip(nli_jobs, scored):
+            # Flag on but model not operational -> "skipped". Fail closed where
+            # NLI is required rather than pass the whole batch quote-only.
+            if settings.nli_required and label == "skipped":
+                raise VerificationUnavailable(
+                    "NLI model returned no judgment (not operational) but "
+                    "entailment is required in this environment."
+                )
             results[i] = _apply_nli(evidence, label, score,
-                                    settings.nli_contradiction_threshold)
+                                    settings.nli_contradiction_threshold,
+                                    settings.nli_neutral_reject_threshold)
 
     report.results = [r for r in results if r is not None]
     logger.info(

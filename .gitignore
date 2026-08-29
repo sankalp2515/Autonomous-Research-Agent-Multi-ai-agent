@@ -34,4 +34,17 @@ Thumbs.db
 .claude
 
 # Interview prep — personal, not part of the public project
-docs/INTERVIEW.md
+docs/*
+demo_claude_v2.html
+demo_codex.html
+demo-landing.html
+demo.html
+VERISCOPE_ARCHITECTURE.md
+VERISCOPE_INTERVIEW_FACT_CARDS.md
+VERISCOPE_QUESTION_FOLLOWUP_MAP.md
+VERISCOPE_SOURCE_OF_TRUTH.md
+VERISCOPE_STRING_SAFE_DONT_CLAIM.md
+veriscope-demo.mp4
+demo_claude.html
+demo-report.html
+CLAUDE.md

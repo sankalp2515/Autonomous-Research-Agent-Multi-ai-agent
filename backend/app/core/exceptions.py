@@ -69,3 +69,13 @@ class ServiceBusyError(AppError):
     """Load-shedding: the job queue is saturated. Client should retry later."""
     code = "service_busy"
     status = 503
+
+
+class RunCancelled(AppError):
+    """The user stopped this run. NOT a failure: the run is torn down at the
+    next cancellation checkpoint and left in a terminal `cancelled` state with
+    whatever work it had already checkpointed. Distinguished from `failed` for
+    the same reason `drafting_failed` is distinguished from an evidence gap —
+    a reader must be able to tell "we stopped it" from "it broke"."""
+    code = "run_cancelled"
+    status = 409

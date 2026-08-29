@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { MonitorData } from "../types";
 import { Empty, Spinner } from "./ui";
+import { Icon } from "./icons";
 
 export default function MonitorView({ projectId }: { projectId: string }) {
   const [data, setData] = useState<MonitorData | null>(null);
@@ -15,15 +16,9 @@ export default function MonitorView({ projectId }: { projectId: string }) {
     () => api.getMonitor(projectId).then(setData).catch(() => setData({ watches: [], alerts: [] })),
     [projectId]
   );
-  useEffect(() => {
-    refresh();
-    return () => clearInterval(pollRef.current);
-  }, [refresh]);
+  useEffect(() => { refresh(); return () => clearInterval(pollRef.current); }, [refresh]);
 
-  function note(m: string) {
-    setToast(m);
-    setTimeout(() => setToast(""), 3000);
-  }
+  function note(m: string) { setToast(m); setTimeout(() => setToast(""), 3000); }
 
   async function check() {
     setChecking(true);
@@ -35,58 +30,47 @@ export default function MonitorView({ projectId }: { projectId: string }) {
       pollRef.current = setInterval(async () => {
         tries++;
         await refresh();
-        if (tries >= 6) {
-          clearInterval(pollRef.current);
-          setChecking(false);
-        }
+        if (tries >= 6) { clearInterval(pollRef.current); setChecking(false); }
       }, 5000);
-    } catch {
-      setChecking(false);
-    }
+    } catch { setChecking(false); }
   }
 
   async function addWatch(e: FormEvent) {
     e.preventDefault();
     if (newQuery.trim().length < 4) return;
     await api.addWatch(projectId, newQuery.trim());
-    setNewQuery("");
-    refresh();
+    setNewQuery(""); refresh();
   }
-  async function toggle(id: string) {
-    await api.toggleWatch(id);
-    refresh();
-  }
+  async function toggle(id: string) { await api.toggleWatch(id); refresh(); }
   async function addToCorpus(id: string) {
     setBusy(id);
-    try {
-      await api.addAlert(id);
-      note("Added to corpus");
-      await refresh();
-    } finally {
-      setBusy("");
-    }
+    try { await api.addAlert(id); note("Added to corpus"); await refresh(); } finally { setBusy(""); }
   }
-  async function dismiss(id: string) {
-    await api.dismissAlert(id);
-    refresh();
-  }
+  async function dismiss(id: string) { await api.dismissAlert(id); refresh(); }
 
   if (!data) return <p><Spinner /> loading monitor…</p>;
+  const activeWatches = data.watches.filter((w) => w.active).length;
 
   return (
     <div className="content-narrow">
-      <div style={{ display: "flex", alignItems: "flex-start", marginBottom: 18 }}>
-        <div>
-          <span className="overline">Monitor agent</span>
-          <p style={{ margin: "4px 0 0", color: "var(--text-2)", fontSize: 13.5, maxWidth: 520, lineHeight: 1.55 }}>
-            Standing watches on your research questions. The agent re-checks
-            arXiv & Semantic Scholar for newly-published papers you haven't seen,
-            scores them for relevance, and surfaces them here.
+      <div className="view-head">
+        <div className="view-head-text">
+          <span className="overline">Corpus · standing agent</span>
+          <h2>Monitor</h2>
+          <p>
+            Standing watches on your research questions. The agent re-checks arXiv &amp; Semantic
+            Scholar for newly-published papers you haven’t seen, scores them for relevance, and
+            surfaces them here.
           </p>
+          <div className="monitor-presence" style={{ marginTop: 10 }}>
+            <span className="pulse-dot" />
+            {activeWatches > 0
+              ? `Monitor is watching ${activeWatches} question${activeWatches === 1 ? "" : "s"}`
+              : "Monitor is idle — add a watch to start"}
+          </div>
         </div>
-        <span style={{ flex: 1 }} />
         <button className="btn btn-accent" onClick={check} disabled={checking}>
-          {checking ? <Spinner /> : "↻ Check now"}
+          {checking ? <Spinner /> : <><Icon.monitor size={14} /> Check now</>}
         </button>
       </div>
 
@@ -94,29 +78,25 @@ export default function MonitorView({ projectId }: { projectId: string }) {
         <span className="overline">Watches</span>
         <div className="watch-row">
           {data.watches.map((w) => (
-            <button key={w.id} className={`watch-chip ${w.active ? "on" : "off"}`}
-                    onClick={() => toggle(w.id)} title={w.active ? "Active — click to pause" : "Paused — click to activate"}>
+            <button key={w.id} className={`watch-chip ${w.active ? "on" : "off"}`} onClick={() => toggle(w.id)}
+                    title={w.active ? "Active — click to pause" : "Paused — click to activate"}>
               <span className="watch-dot" /> {w.query.length > 70 ? w.query.slice(0, 68) + "…" : w.query}
             </button>
           ))}
           {data.watches.length === 0 && (
-            <span style={{ fontSize: 13, color: "var(--text-3)" }}>
-              No watches yet — they seed automatically from your research, or add one below.
-            </span>
+            <span style={{ fontSize: 13, color: "var(--ink-3)" }}>No watches yet — they seed automatically from your research, or add one below.</span>
           )}
         </div>
         <form onSubmit={addWatch} className="ask-row" style={{ marginTop: 12 }}>
-          <input className="input" placeholder="Add a topic to watch…" value={newQuery}
-                 onChange={(e) => setNewQuery(e.target.value)} />
-          <button className="btn btn-ghost" disabled={newQuery.trim().length < 4}>Add watch</button>
+          <input className="input" placeholder="Add a topic to watch…" value={newQuery} onChange={(e) => setNewQuery(e.target.value)} />
+          <button className="btn" disabled={newQuery.trim().length < 4}>Add watch</button>
         </form>
       </div>
 
       <span className="overline">New papers{data.alerts.length ? ` · ${data.alerts.length}` : ""}</span>
       {data.alerts.length === 0 ? (
         <Empty glyph="◷" title="No new papers right now">
-          When the agent finds papers matching your watches, they appear here.
-          Hit "Check now" to run it immediately.
+          When the agent finds papers matching your watches, they appear here. Hit “Check now” to run it immediately.
         </Empty>
       ) : (
         <div className="panel" style={{ marginTop: 10, overflow: "hidden" }}>
@@ -125,22 +105,18 @@ export default function MonitorView({ projectId }: { projectId: string }) {
               <div className="alert-main">
                 <div className="alert-head">
                   <a href={a.url} target="_blank" rel="noreferrer" className="alert-title">
-                    {a.title} <span style={{ opacity: 0.6 }}>↗</span>
+                    {a.title} <Icon.external size={12} style={{ display: "inline", verticalAlign: -1, color: "var(--ink-3)" }} />
                   </a>
-                  <span className="alert-score" title="relevance to your watch">
-                    {Math.round(a.score * 100)}% match
-                  </span>
+                  <span className="alert-score" title="relevance to your watch">{Math.round(a.score * 100)}% match</span>
                 </div>
                 <div className="alert-meta">
                   {a.authors?.[0]}{a.authors?.length > 1 ? " et al." : ""}
-                  {a.year ? ` · ${a.year}` : ""}
-                  {a.has_pdf ? " · full text" : " · abstract"}
+                  {a.year ? ` · ${a.year}` : ""}{a.has_pdf ? " · full text" : " · abstract"}
                 </div>
                 <p className="alert-abs">{a.abstract}…</p>
               </div>
               <div className="alert-actions">
-                <button className="btn" style={{ fontSize: 12, padding: "5px 12px" }}
-                        onClick={() => addToCorpus(a.id)} disabled={busy === a.id}>
+                <button className="btn" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => addToCorpus(a.id)} disabled={busy === a.id}>
                   {busy === a.id ? <Spinner /> : "+ Add to corpus"}
                 </button>
                 <button className="nb-remove" onClick={() => dismiss(a.id)}>dismiss</button>

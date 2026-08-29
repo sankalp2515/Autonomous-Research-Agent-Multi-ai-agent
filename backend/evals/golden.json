@@ -15,6 +15,26 @@
       "doc_id": "g3",
       "title": "Cross-encoder limitations",
       "text": "Cross-encoder relevance scores correlate poorly with entailment judgments. Sentence pairs with opposite polarity, such as negated statements, received near-identical relevance scores in 83% of tested cases, confirming that similarity-based scoring cannot substitute for natural language inference."
+    },
+    {
+      "doc_id": "g4",
+      "title": "Hybrid retrieval fusion",
+      "text": "Combining dense embedding retrieval with lexical BM25 through reciprocal rank fusion improved recall@10 by 18% over dense-only retrieval on our benchmark. The two methods surface complementary results: dense retrieval captures paraphrase, while BM25 anchors rare exact terms such as identifiers and numbers."
+    },
+    {
+      "doc_id": "g5",
+      "title": "Chunk size and grounding",
+      "text": "Smaller retrieval chunks improved citation precision but reduced context sufficiency. At 256 tokens, 88% of cited spans exactly located the supporting sentence, versus 64% at 1024 tokens, but answers at 256 tokens more often omitted necessary surrounding context, raising the refusal rate by 9 points."
+    },
+    {
+      "doc_id": "g6",
+      "title": "Refusal calibration",
+      "text": "When the corpus lacked supporting evidence, an explicit refusal was rated more trustworthy than a confident unsupported answer by a margin of 31 percentage points in a user study of 240 participants. Labeling the gap, rather than hedging, drove most of the trust gain."
+    },
+    {
+      "doc_id": "g7",
+      "title": "Quote-match verification",
+      "text": "Requiring a verbatim quote per generated claim, checked by normalized exact matching against the cited chunk, drove fabricated citations to zero across 1,000 generated claims. Because an exact quote cannot be satisfied by a paraphrase, the constraint holds even for small, weak models."
     }
   ],
   "supported_questions": [
@@ -37,11 +57,34 @@
       "question": "Can cross-encoder similarity substitute for entailment checking?",
       "must_cite_doc": "g3",
       "answer_must_contain": "83%"
+    },
+    {
+      "question": "How much did hybrid retrieval with rank fusion improve recall@10?",
+      "must_cite_doc": "g4",
+      "answer_must_contain": "18%"
+    },
+    {
+      "question": "How does smaller chunk size affect the precision of cited spans?",
+      "must_cite_doc": "g5",
+      "answer_must_contain": "88%"
+    },
+    {
+      "question": "How much more trustworthy was an explicit refusal than a confident unsupported answer?",
+      "must_cite_doc": "g6",
+      "answer_must_contain": "31"
+    },
+    {
+      "question": "What effect did requiring a verbatim quote per claim have on fabricated citations?",
+      "must_cite_doc": "g7",
+      "answer_must_contain": "zero"
     }
   ],
   "unsupported_questions": [
     {"question": "What is the market size for AI research tools in 2026?"},
     {"question": "Which optimizer converges fastest for vision transformers?"},
-    {"question": "What did the authors conclude about reinforcement learning from human feedback?"}
+    {"question": "What did the authors conclude about reinforcement learning from human feedback?"},
+    {"question": "What is the recommended learning rate schedule for pretraining a 7B language model?"},
+    {"question": "How does the corpus say quantization affects inference latency on mobile GPUs?"},
+    {"question": "Which vector database offers the lowest p99 query latency at a billion vectors?"}
   ]
 }

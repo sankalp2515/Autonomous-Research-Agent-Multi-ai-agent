@@ -62,7 +62,19 @@ def create_app() -> FastAPI:
             "start an unauthenticated API. Set AUTH_DISABLED=false and configure "
             "SUPABASE_URL."
         )
+    # Fail closed on the verification truth layer too: prod must not run the gate
+    # on quote-match alone (NLI off). Same boot-time refusal posture as auth.
+    from app.verification.gate import assert_verification_ready
+    assert_verification_ready()
+    # Invite emails would link to localhost if app_base_url isn't set for prod.
+    if (settings.app_env == "prod" and settings.smtp_host
+            and "localhost" in settings.app_base_url):
+        logger.warning("APP_BASE_URL is still localhost while SMTP is configured — "
+                       "invite emails will link to localhost. Set APP_BASE_URL.")
     _init_sentry(settings)
+    # LangSmith: wire LANGCHAIN_* env so the LangGraph pipeline auto-traces.
+    from app.llm.tracing import init_langsmith
+    init_langsmith()
     app = FastAPI(
         title="Grounded Research Assistant",
         version="0.1.0",
@@ -76,6 +88,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Rate limiting + tracing + metrics all live in install_observability's
+    # middleware (per-subject fixed window, tighter bucket for /pipeline). A
+    # second limiter used to live here too — removed: two middlewares double the
+    # Redis calls and split the budget across inconsistent keys. One source of
+    # truth now.
     install_observability(app)
 
     # OpenTelemetry request/httpx/redis spans (no-op unless OTEL_ENABLED).

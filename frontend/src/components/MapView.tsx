@@ -1,49 +1,39 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
 import { api } from "../api";
 import type { MapData, MapNode } from "../types";
 import ChatView from "./ChatView";
 import { Empty, Spinner } from "./ui";
+import { AddToChat } from "../chatctx";
 
 const W = 920;
 const H = 580;
 type Pt = { x: number; y: number };
 
-function layout(data: MapData): Map<string, Pt> {
-  const { nodes, edges } = data;
+// Categorical cluster palette — a small, warm-paper set of muted editorial hues
+// that sits inside the "Editorial Science" system. Colour here encodes a
+// *sub-community of related work* (a data-viz categorical scale, not chrome).
+const CLUSTER = [
+  "var(--accent)", "#356b4a", "#8a5a1a", "#3d5a80", "#7a4069", "#5a6b2f",
+  "#9a6a2a", "#2f6b6b", "#8c4a4a", "#4a4a7a",
+];
+const clusterColor = (c?: number) => CLUSTER[(c ?? 0) % CLUSTER.length];
+
+// Fallback only: older cached maps may lack server-side x/y. New runs always
+// carry precomputed positions, so this seed layout is rarely used.
+function seedLayout(data: MapData): Map<string, Pt> {
   const pos = new Map<string, Pt>();
-  nodes.forEach((n, i) => {
-    const a = (i / Math.max(nodes.length, 1)) * Math.PI * 2;
-    pos.set(n.id, { x: W / 2 + Math.cos(a) * 180 + (i % 7), y: H / 2 + Math.sin(a) * 150 + (i % 5) });
+  data.nodes.forEach((n, i) => {
+    const a = (i / Math.max(data.nodes.length, 1)) * Math.PI * 2;
+    pos.set(n.id, { x: W / 2 + Math.cos(a) * 180, y: H / 2 + Math.sin(a) * 150 });
   });
-  if (nodes.length < 2) return pos;
-  const k = Math.sqrt((W * H) / nodes.length) * 0.55;
-  for (let it = 0; it < 260; it++) {
-    const disp = new Map(nodes.map((n) => [n.id, { x: 0, y: 0 }]));
-    for (let a = 0; a < nodes.length; a++)
-      for (let b = a + 1; b < nodes.length; b++) {
-        const pa = pos.get(nodes[a].id)!, pb = pos.get(nodes[b].id)!;
-        const dx = pa.x - pb.x, dy = pa.y - pb.y, d = Math.hypot(dx, dy) || 0.01;
-        const f = (k * k) / d, ux = dx / d, uy = dy / d;
-        const da = disp.get(nodes[a].id)!, db = disp.get(nodes[b].id)!;
-        da.x += ux * f; da.y += uy * f; db.x -= ux * f; db.y -= uy * f;
-      }
-    for (const e of edges) {
-      const pa = pos.get(e.src), pb = pos.get(e.dst);
-      if (!pa || !pb) continue;
-      const dx = pa.x - pb.x, dy = pa.y - pb.y, d = Math.hypot(dx, dy) || 0.01;
-      const f = ((d * d) / k) * (0.4 + e.weight), ux = dx / d, uy = dy / d;
-      const da = disp.get(e.src)!, db = disp.get(e.dst)!;
-      da.x -= ux * f; da.y -= uy * f; db.x += ux * f; db.y += uy * f;
-    }
-    const temp = (1 - it / 260) * (W / 12);
-    for (const n of nodes) {
-      const dp = disp.get(n.id)!, p = pos.get(n.id)!;
-      const dl = Math.hypot(dp.x, dp.y) || 0.01;
-      p.x = Math.max(28, Math.min(W - 28, p.x + (dp.x / dl) * Math.min(dl, temp)));
-      p.y = Math.max(28, Math.min(H - 28, p.y + (dp.y / dl) * Math.min(dl, temp)));
-    }
-  }
   return pos;
+}
+
+function positions(data: MapData): Map<string, Pt> {
+  const hasServer = data.nodes.every((n) => typeof n.x === "number" && typeof n.y === "number");
+  if (!hasServer) return seedLayout(data);
+  return new Map(data.nodes.map((n) => [n.id, { x: n.x!, y: n.y! }]));
 }
 
 export default function MapView({
@@ -58,6 +48,8 @@ export default function MapView({
   const [sel, setSel] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [asking, setAsking] = useState<MapNode | null>(null);
+  const [why, setWhy] = useState(false);
+  const reduce = useReducedMotion();
   // Multi-select for cross-paper comparison: the map is the visual entry point
   // to the Compare view — pick nodes here, compare them there.
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -86,11 +78,11 @@ export default function MapView({
   }
   const [t, setT] = useState({ tx: 0, ty: 0, k: 1 });
   const svgRef = useRef<SVGSVGElement>(null);
-  const drag = useRef<{ kind: "pan" | "node"; id?: string; sx: number; sy: number; otx: number; oty: number } | null>(null);
+  const drag = useRef<{ kind: "pan" | "node"; id?: string; sx: number; sy: number; otx: number; oty: number; moved: boolean } | null>(null);
 
   useEffect(() => {
     setData(null); setSel(null); setT({ tx: 0, ty: 0, k: 1 });
-    api.getMap(projectId).then((d) => { setData(d); setPos(layout(d)); }).catch(() => setData({ nodes: [], edges: [] }));
+    api.getMap(projectId).then((d) => { setData(d); setPos(positions(d)); }).catch(() => setData({ nodes: [], edges: [] }));
   }, [projectId]);
 
   const neighbors = useMemo(() => {
@@ -120,12 +112,13 @@ export default function MapView({
   }
 
   function onDown(e: React.MouseEvent, id?: string) {
-    if (id) { e.stopPropagation(); setSel(id); }
-    drag.current = { kind: id ? "node" : "pan", id, sx: e.clientX, sy: e.clientY, otx: t.tx, oty: t.ty };
+    if (id) e.stopPropagation();
+    drag.current = { kind: id ? "node" : "pan", id, sx: e.clientX, sy: e.clientY, otx: t.tx, oty: t.ty, moved: false };
   }
   function onMove(e: React.MouseEvent) {
     const d = drag.current;
     if (!d) return;
+    if (Math.abs(e.clientX - d.sx) + Math.abs(e.clientY - d.sy) > 3) d.moved = true;
     if (d.kind === "pan") {
       const r = svgRef.current!.getBoundingClientRect();
       setT((p) => ({ ...p, tx: d.otx + ((e.clientX - d.sx) / r.width) * W, ty: d.oty + ((e.clientY - d.sy) / r.height) * H }));
@@ -134,19 +127,24 @@ export default function MapView({
       setPos((m) => new Map(m).set(d.id!, g));
     }
   }
-  function onUp() { drag.current = null; }
+  function onUp() {
+    const d = drag.current;
+    // Click (not drag) on a node selects it — separates "reposition" from "select".
+    if (d?.kind === "node" && d.id && !d.moved) setSel(d.id);
+    drag.current = null;
+  }
 
   async function reload(refresh: boolean) {
     setData(null); setSel(null); setT({ tx: 0, ty: 0, k: 1 });
     try {
       const d = await api.getMap(projectId, refresh);
-      setData(d); setPos(layout(d));
+      setData(d); setPos(positions(d));
     } catch {
       setData({ nodes: [], edges: [] });
     }
   }
 
-  if (!data) return <p><Spinner /> building map…</p>;
+  if (!data) return <p><Spinner /> opening map…</p>;
   if (data.nodes.length < 2)
     return (
       <Empty glyph="◬" title="Not enough papers to map yet">
@@ -158,21 +156,27 @@ export default function MapView({
   const selNode = data.nodes.find((n) => n.id === sel) || null;
   const r = (n: MapNode) => 6 + Math.min(Math.log1p(n.citations) * 2.2, 12);
   const tf = `translate(${t.tx} ${t.ty}) scale(${t.k})`;
+  const clusterCount = data.clusters ?? 0;
 
   return (
     <div>
       <div style={{ display: "flex", alignItems: "flex-start", marginBottom: 12 }}>
         <div>
           <span className="overline">Discovery map · papers only</span>
-          <p style={{ margin: "4px 0 0", color: "var(--text-2)", fontSize: 13.5, maxWidth: 600, lineHeight: 1.55 }}>
-            Papers connected by content similarity. Drag to pan, scroll to zoom,
-            drag a node to reposition, click a paper to highlight its neighbours and act on it.
+          <p style={{ margin: "4px 0 0", color: "var(--ink-3)", fontSize: 13.5, maxWidth: 640, lineHeight: 1.55 }}>
+            Every paper in this project’s corpus, positioned by content similarity and
+            coloured by <strong>sub-community</strong>. Use it to see how the literature
+            clusters, spot the bridges between groups, find outliers — then compare or
+            interrogate any paper without leaving the view.{" "}
+            <button className="map-why-toggle" onClick={() => setWhy((v) => !v)}>
+              {why ? "Hide" : "Why this view?"}
+            </button>
           </p>
         </div>
         <span style={{ flex: 1 }} />
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-ghost" style={{ fontSize: 12 }}
-                  onClick={() => { setPos(layout(data)); setT({ tx: 0, ty: 0, k: 1 }); }}>
+                  onClick={() => { setPos(positions(data)); setT({ tx: 0, ty: 0, k: 1 }); }}>
             ⟲ Reset view
           </button>
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => reload(true)}>
@@ -181,10 +185,29 @@ export default function MapView({
         </div>
       </div>
 
+      {why && (
+        <motion.div className="map-why"
+          initial={reduce ? false : { opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          transition={{ duration: 0.2, ease: "easeOut" }}>
+          <p><strong>What problem it solves.</strong> A verified report answers your question,
+            but it doesn’t show you the <em>shape</em> of the evidence. The map does: which
+            papers form a tight school of thought, which one paper connects two otherwise
+            separate clusters (often the most cited / most pivotal), and which papers sit
+            alone — candidate gaps or fringe ideas worth a closer read.</p>
+          <p><strong>How to use it.</strong> Clusters (colour) = related work. Dot size =
+            citation weight. Click a paper to highlight what it’s closest to, then{" "}
+            <em>Add to compare</em> to run a side-by-side, or <em>Ask this paper</em> to chat
+            with its full text. It’s the fastest way to go from “here’s a report” to “here’s
+            the landscape, and here’s where to dig next.”</p>
+        </motion.div>
+      )}
+
       <div className="map-legend">
+        <span><span className="leg-line dashed" /> similar content</span>
         <span><span className="leg-line solid" /> cites</span>
-        <span><span className="leg-line dashed" /> similar</span>
         <span><span className="leg-dot" /> dot size = citations</span>
+        {clusterCount > 1 && <span className="mono" style={{ color: "var(--ink-3)" }}>{clusterCount} sub-communities</span>}
       </div>
 
       <div className="map-wrap">
@@ -200,44 +223,55 @@ export default function MapView({
               const cite = e.kind === "cites";
               return (
                 <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                      stroke={active ? "var(--primary)" : cite ? "var(--text-3)" : "var(--line-2)"}
+                      stroke={active ? "var(--accent)" : cite ? "var(--ink-3)" : "var(--line-2)"}
                       strokeWidth={(active ? 1.8 : cite ? 1.2 : 0.7) / t.k}
                       strokeDasharray={cite ? undefined : `${3 / t.k} ${3 / t.k}`}
-                      opacity={sel ? (active ? 0.95 : 0.1) : cite ? 0.6 : 0.4} />
+                      opacity={sel ? (active ? 0.95 : 0.08) : cite ? 0.55 : 0.32} />
               );
             })}
-            {data.nodes.map((n) => {
+            {data.nodes.map((n, i) => {
               const p = pos.get(n.id)!;
               const dim = sel && n.id !== sel && !neighbors.has(n.id);
               const isSel = n.id === sel;
               const showLabel = isSel || neighbors.has(n.id) || hover === n.id || data.nodes.length <= 16;
+              const col = clusterColor(n.cluster);
               return (
-                <g key={n.id} style={{ cursor: "pointer", opacity: dim ? 0.28 : 1 }}
-                   onMouseDown={(e) => onDown(e, n.id)}
+                <motion.g key={n.id} style={{ cursor: "pointer" }}
+                   initial={reduce ? false : { opacity: 0, scale: 0.5 }}
+                   animate={{ opacity: dim ? 0.26 : 1, scale: 1 }}
+                   transition={reduce ? { duration: 0 } : { delay: Math.min(i * 0.012, 0.6), duration: 0.35, ease: "easeOut" }}
+                   onMouseDown={(e) => onDown(e as unknown as React.MouseEvent, n.id)}
                    onMouseEnter={() => setHover(n.id)} onMouseLeave={() => setHover(null)}>
                   {picked.has(n.id) && (
                     <circle cx={p.x} cy={p.y} r={r(n) + 4 / t.k} fill="none"
-                            stroke="var(--primary)" strokeWidth={2 / t.k} />
+                            stroke="var(--accent)" strokeWidth={2 / t.k} />
                   )}
                   <circle cx={p.x} cy={p.y} r={r(n)}
-                          fill={isSel ? "var(--primary)" : neighbors.has(n.id) ? "var(--primary-deep)" : "var(--text-2)"}
-                          stroke="#fff" strokeWidth={1.5 / t.k} />
+                          fill={col}
+                          fillOpacity={isSel ? 1 : neighbors.has(n.id) ? 0.9 : 0.72}
+                          stroke={isSel ? "var(--ink)" : "var(--surface)"}
+                          strokeWidth={(isSel ? 2 : 1.5) / t.k} />
                   {showLabel && (
                     <text x={p.x} y={p.y - r(n) - 4 / t.k} textAnchor="middle"
-                          style={{ font: `${10 / t.k}px Inter`, fill: "var(--text-2)", pointerEvents: "none" }}>
+                          style={{ font: `${10 / t.k}px "Hanken Grotesk"`, fill: "var(--ink-2)", pointerEvents: "none" }}>
                       {n.title.length > 28 ? n.title.slice(0, 26) + "…" : n.title}
                     </text>
                   )}
-                </g>
+                </motion.g>
               );
             })}
           </g>
         </svg>
 
         {selNode && (
-          <aside className="map-panel">
+          <motion.aside className="map-panel"
+            initial={reduce ? false : { opacity: 0, x: 12 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}>
             <button className="map-panel-x" onClick={() => setSel(null)}>×</button>
-            <span className="overline">{selNode.source_type}</span>
+            <span className="overline" style={{ color: clusterColor(selNode.cluster) }}>
+              {selNode.source_type}{typeof selNode.cluster === "number" ? ` · cluster ${selNode.cluster + 1}` : ""}
+            </span>
             <h3>{selNode.title}</h3>
             <p className="map-panel-meta">
               {selNode.authors?.slice(0, 3).join(", ")}
@@ -246,6 +280,7 @@ export default function MapView({
             </p>
             <p className="map-panel-near">{neighbors.size} closely-related paper{neighbors.size === 1 ? "" : "s"} highlighted</p>
             <div className="map-panel-actions">
+              <AddToChat item={{ kind: "document", id: selNode.id, label: `paper · ${selNode.title}` }} />
               <button className={`btn ${picked.has(selNode.id) ? "" : "btn-ghost"}`} style={{ fontSize: 12.5 }}
                       onClick={() => togglePick(selNode.id)}>
                 {picked.has(selNode.id) ? "✓ In comparison" : "⊞ Add to compare"}
@@ -262,12 +297,14 @@ export default function MapView({
                 <a className="btn btn-ghost" style={{ fontSize: 12.5 }} href={selNode.url} target="_blank" rel="noreferrer">Open ↗</a>
               )}
             </div>
-          </aside>
+          </motion.aside>
         )}
       </div>
 
       {picked.size > 0 && (
-        <div className="map-tray">
+        <motion.div className="map-tray"
+          initial={reduce ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.18, ease: "easeOut" }}>
           <span className="map-tray-count mono">{picked.size} selected</span>
           <span className="map-tray-hint">for comparison</span>
           <span style={{ flex: 1 }} />
@@ -279,7 +316,7 @@ export default function MapView({
                   onClick={() => onCompare?.([...picked])}>
             ⊞ Compare {picked.size} papers →
           </button>
-        </div>
+        </motion.div>
       )}
 
       {asking && (

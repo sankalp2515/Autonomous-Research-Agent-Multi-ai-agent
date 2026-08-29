@@ -36,10 +36,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listProjects: () => request<Project[]>("/api/projects"),
-  createProject: (name: string, description = "") =>
+  createProject: (name: string, description = "", orgId?: string | null) =>
     request<{ id: string }>("/api/projects", {
       method: "POST",
-      body: JSON.stringify({ name, description }),
+      body: JSON.stringify({ name, description, org_id: orgId ?? null }),
     }),
 
   listDocuments: (projectId: string) =>
@@ -75,14 +75,31 @@ export const api = {
     request<import("./types").MapData>(
       `/api/projects/${projectId}/map${refresh ? "?refresh=1" : ""}`
     ),
+  getDashboard: (projectId: string) =>
+    request<import("./types").Dashboard>(`/api/projects/${projectId}/dashboard`),
 
   startPipeline: (
     projectId: string, query: string,
-    scope: "all" | "papers" = "all", sinceYear = 0
+    scope: "all" | "papers" | "library" = "all", sinceYear = 0,
+    extra: { until_year?: number; min_citations?: number; selected_papers?: import("./types").Candidate[] } = {}
   ) =>
     request<{ run_id: string }>("/api/pipeline", {
       method: "POST",
-      body: JSON.stringify({ project_id: projectId, query, scope, since_year: sinceYear }),
+      body: JSON.stringify({
+        project_id: projectId, query, scope, since_year: sinceYear,
+        until_year: extra.until_year ?? 0, min_citations: extra.min_citations ?? 0,
+        selected_papers: extra.selected_papers ?? [],
+      }),
+    }),
+  // Interactive pre-run screening: search + rank + recommend, without ingesting.
+  screen: (projectId: string, query: string, opts: { since_year?: number; until_year?: number; min_citations?: number } = {}) =>
+    request<import("./types").ScreenResult>("/api/screen", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: projectId, query,
+        since_year: opts.since_year ?? 0, until_year: opts.until_year ?? 0,
+        min_citations: opts.min_citations ?? 0,
+      }),
     }),
   listRuns: (projectId: string) =>
     request<Run[]>(`/api/projects/${projectId}/runs`),
@@ -127,7 +144,46 @@ export const api = {
     return () => ctrl.abort();
   },
 
+  // Live WebSocket watch of a run — pushes progress and a final {event:"done"}
+  // frame used to raise a completion notification. Auth is a first-message
+  // handshake (the token never touches the URL). Returns a stop() function.
+  watchRunWS: (
+    runId: string,
+    onMsg: (m: RunStatus["live"]) => void,
+    onDone: (status?: string) => void
+  ) => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${proto}//${window.location.host}/api/status/${runId}/ws`);
+    let done = false;
+    ws.onopen = () => ws.send(JSON.stringify({ token: getToken() ?? "" }));
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data?.event === "done") { done = true; onDone(data.status); ws.close(); return; }
+        onMsg(data);
+      } catch { /* skip malformed frame */ }
+    };
+    ws.onclose = () => { if (!done) onDone(); };
+    return () => { done = true; try { ws.close(); } catch { /* already closed */ } };
+  },
+
+  // Tenancy: the orgs (workspaces/teams) the caller belongs to, with their role.
+  listOrgs: () => request<import("./types").Org[]>("/api/orgs"),
+  createOrg: (name: string) => request<{ id: string; name: string }>("/api/orgs", { method: "POST", body: JSON.stringify({ name }) }),
+  acceptInvites: () => request<{ joined: number; orgs: string[] }>("/api/invites/accept", { method: "POST" }),
+  listMembers: (orgId: string) => request<import("./types").OrgMember[]>(`/api/orgs/${orgId}/members`),
+  removeMember: (orgId: string, memberId: string) => request<{ removed: string }>(`/api/orgs/${orgId}/members/${memberId}`, { method: "DELETE" }),
+  updateMemberRole: (orgId: string, memberId: string, role: string) => request<{ role: string }>(`/api/orgs/${orgId}/members/${memberId}`, { method: "PATCH", body: JSON.stringify({ role }) }),
+  listInvites: (orgId: string) => request<import("./types").OrgInvite[]>(`/api/orgs/${orgId}/invites`),
+  createInvite: (orgId: string, email: string, role: string) => request<import("./types").OrgInvite>(`/api/orgs/${orgId}/invites`, { method: "POST", body: JSON.stringify({ email, role }) }),
+  revokeInvite: (orgId: string, inviteId: string) => request<{ revoked: string }>(`/api/orgs/${orgId}/invites/${inviteId}`, { method: "DELETE" }),
+
   getReport: (reportId: string) => request<Report>(`/api/report/${reportId}`),
+  // Sharing: mint (or fetch) a short public token for a report, and read a
+  // report by that token with no auth (the slug is the capability).
+  createShare: (reportId: string) =>
+    request<{ slug: string }>(`/api/report/${reportId}/share`, { method: "POST" }),
+  getShared: (slug: string) => request<Report & { shared?: boolean }>(`/api/shared/${slug}`),
   getContradictions: (reportId: string) =>
     request<{ contradictions: import("./types").Contradiction[] }>(
       `/api/report/${reportId}/contradictions`
@@ -137,15 +193,24 @@ export const api = {
   getNextQuestions: (reportId: string) =>
     request<{ questions: string[] }>(`/api/report/${reportId}/next-questions`),
 
-  chat: (projectId: string, question: string, documentId?: string) =>
+  chat: (
+    projectId: string,
+    question: string,
+    documentId?: string,
+    entityRefs?: { kind: string; id: string }[]
+  ) =>
     request<ChatResult>("/api/chat", {
       method: "POST",
       body: JSON.stringify({
         project_id: projectId,
         question,
         document_id: documentId ?? null,
+        entity_refs: entityRefs && entityRefs.length ? entityRefs : null,
       }),
     }),
+  // Durable corpus-chat history — restores the Ask conversation after a refresh.
+  listAnswers: (projectId: string) =>
+    request<(ChatResult & { question: string; created_at: string })[]>(`/api/projects/${projectId}/answers`),
   refind: (projectId: string, query: string) =>
     request<RefindHit[]>("/api/refind", {
       method: "POST",
@@ -214,6 +279,15 @@ export const api = {
     request<{ run_id: string; status: string }>(`/api/runs/${runId}/resume`, {
       method: "POST",
     }),
+  // Returns "cancelled" when the run was still queued (stopped outright) and
+  // "cancelling" when a worker holds it — that one lands at the pipeline's next
+  // cancellation checkpoint, so the UI must show the intermediate state rather
+  // than claim it has already stopped.
+  cancelRun: (runId: string) =>
+    request<{ run_id: string; status: "cancelled" | "cancelling" }>(
+      `/api/runs/${runId}/cancel`,
+      { method: "POST" }
+    ),
 
   createComparison: (
     projectId: string,

@@ -1,0 +1,205 @@
+{
+  "description": "Labeled boundary set for calibrating the verification gate's NLI + quote thresholds. Each case is a (chunk, claim, quote) triple with a ground-truth 'should_verify' label decided by MEANING, not by the current gate. Categories name the boundary each case probes. Run evals/calibrate.py (NLI enabled) to measure false-accept / false-reject rates at the shipped thresholds and to sweep them.",
+  "cases": [
+    {
+      "id": "sup-entail-1",
+      "category": "clear_entailment",
+      "should_verify": true,
+      "chunk": "Retrieval-augmented generation reduces hallucination rates by grounding outputs in retrieved passages. In our study, RAG reduced factual errors by 37% compared to closed-book generation.",
+      "claim": "Grounding outputs in retrieved passages reduced factual errors by 37% relative to closed-book generation.",
+      "quote": "RAG reduced factual errors by 37% compared to closed-book generation"
+    },
+    {
+      "id": "sup-entail-2",
+      "category": "clear_entailment",
+      "should_verify": true,
+      "chunk": "Schema-validated extraction recovered 94% of target fields, compared to 71% for unconstrained prose extraction with the same model.",
+      "claim": "Schema-validated extraction recovered 94% of target fields.",
+      "quote": "recovered 94% of target fields"
+    },
+    {
+      "id": "sup-fuzzy-pdfnoise",
+      "category": "fuzzy_quote_pdf_noise",
+      "should_verify": true,
+      "chunk": "The cross-encoder re-ranker improved nDCG@10 by 4.2 points over the dense-only baseline on the in-domain test set.",
+      "claim": "A cross-encoder re-ranker improved nDCG@10 by 4.2 points over the dense-only baseline.",
+      "quote": "improved nDCG@10 by 4.2  points over the dense- only baseline"
+    },
+    {
+      "id": "unsup-contradiction-num",
+      "category": "contradiction_numeric",
+      "should_verify": false,
+      "chunk": "In our study, RAG reduced factual errors by 37% compared to closed-book generation.",
+      "claim": "RAG increased factual errors compared to closed-book generation.",
+      "quote": "RAG reduced factual errors by 37% compared to closed-book generation"
+    },
+    {
+      "id": "unsup-contradiction-polarity",
+      "category": "contradiction_polarity",
+      "should_verify": false,
+      "chunk": "Cross-encoder relevance scores correlate poorly with entailment judgments, confirming similarity cannot substitute for natural language inference.",
+      "claim": "Cross-encoder relevance scores are an excellent substitute for entailment judgments.",
+      "quote": "Cross-encoder relevance scores correlate poorly with entailment judgments"
+    },
+    {
+      "id": "unsup-out-of-context",
+      "category": "out_of_context_neutral",
+      "should_verify": false,
+      "chunk": "The dataset was collected from three universities over two semesters. All annotators held graduate degrees in linguistics. Inter-annotator agreement is reported in Table 2.",
+      "claim": "The proposed model achieves state-of-the-art accuracy on the benchmark.",
+      "quote": "All annotators held graduate degrees in linguistics"
+    },
+    {
+      "id": "unsup-fabricated-quote",
+      "category": "fabricated_quote",
+      "should_verify": false,
+      "chunk": "RAG reduced factual errors by 37% compared to closed-book generation.",
+      "claim": "RAG eliminated all hallucinations in every tested domain.",
+      "quote": "RAG eliminated one hundred percent of hallucinations across all domains tested"
+    },
+    {
+      "id": "unsup-overspecified-entity",
+      "category": "overspecified_entity",
+      "should_verify": false,
+      "chunk": "The framework addresses regulatory constraints in machine learning without naming any specific statute.",
+      "claim": "The EU's Artificial Intelligence Act mandates bias monitoring for high-risk systems.",
+      "quote": "regulatory constraints in machine learning"
+    },
+    {
+      "id": "sup-entity-present",
+      "category": "entity_present",
+      "should_verify": true,
+      "chunk": "IBM's AI Fairness 360 toolkit provides metrics to detect and mitigate dataset bias.",
+      "claim": "IBM's AI Fairness 360 provides metrics to detect and mitigate dataset bias.",
+      "quote": "provides metrics to detect and mitigate dataset bias"
+    },
+    {
+      "id": "border-weak-entailment",
+      "category": "weak_entailment",
+      "should_verify": true,
+      "chunk": "The method generally improved retrieval quality across most of the evaluated settings, though gains varied by domain.",
+      "claim": "The method improved retrieval quality in most evaluated settings.",
+      "quote": "generally improved retrieval quality across most of the evaluated settings"
+    },
+    {
+      "id": "unsup-scope-overreach",
+      "category": "scope_overreach_neutral",
+      "should_verify": false,
+      "chunk": "On the English-language subset, the classifier reached an F1 of 0.88.",
+      "claim": "The classifier reached an F1 of 0.88 across all languages in the corpus.",
+      "quote": "the classifier reached an F1 of 0.88"
+    },
+    {
+      "id": "sup-mechanism",
+      "category": "clear_entailment",
+      "should_verify": true,
+      "chunk": "When the retriever returned irrelevant passages, error rates exceeded the closed-book baseline by 12%.",
+      "claim": "Irrelevant retrieved passages pushed error rates 12% above the closed-book baseline.",
+      "quote": "error rates exceeded the closed-book baseline by 12%"
+    },
+    {
+      "id": "unsup-unit-mismatch",
+      "category": "contradiction_numeric",
+      "should_verify": false,
+      "chunk": "Training completed in 6 hours on a single GPU.",
+      "claim": "Training completed in 6 days on a single GPU.",
+      "quote": "Training completed in 6"
+    },
+    {
+      "id": "unsup-temporal-overreach",
+      "category": "scope_overreach_neutral",
+      "should_verify": false,
+      "chunk": "In the 2021 evaluation, the system reached 90% accuracy.",
+      "claim": "The system consistently reaches 90% accuracy every year.",
+      "quote": "the system reached 90% accuracy"
+    },
+    {
+      "id": "unsup-aggregation-error",
+      "category": "scope_overreach_neutral",
+      "should_verify": false,
+      "chunk": "On the easiest of the five subtasks, accuracy reached 95%.",
+      "claim": "Average accuracy across all five subtasks reached 95%.",
+      "quote": "accuracy reached 95%"
+    },
+    {
+      "id": "sup-hedged-claim",
+      "category": "weak_entailment",
+      "should_verify": true,
+      "chunk": "The results suggest that longer context windows may modestly reduce omission errors, though the effect was not statistically significant.",
+      "claim": "Longer context windows may modestly reduce omission errors, per non-significant results.",
+      "quote": "longer context windows may modestly reduce omission errors, though the effect was not statistically significant"
+    },
+    {
+      "id": "unsup-cross-doc-conflation",
+      "category": "out_of_context_neutral",
+      "should_verify": false,
+      "chunk": "The re-ranker was trained on the MS MARCO passage dataset.",
+      "claim": "The re-ranker was trained on the Natural Questions dataset.",
+      "quote": "The re-ranker was trained on the"
+    },
+    {
+      "id": "sup-ligature-fuzzy",
+      "category": "fuzzy_quote_pdf_noise",
+      "should_verify": true,
+      "chunk": "The classifier was fine-tuned with a coefficient of efficiency reported for each fold.",
+      "claim": "The classifier was fine-tuned, with an efficiency coefficient reported per fold.",
+      "quote": "fine-tuned with a coeﬃcient of eﬃciency reported for each fold"
+    },
+    {
+      "id": "unsup-method-absent",
+      "category": "overspecified_entity",
+      "should_verify": false,
+      "chunk": "We optimize the model with a standard gradient-based method and early stopping.",
+      "claim": "We optimize the model with the AdamW optimizer and cosine decay.",
+      "quote": "optimize the model with a standard gradient-based method"
+    },
+    {
+      "id": "sup-negation-correct",
+      "category": "clear_entailment",
+      "should_verify": true,
+      "chunk": "BM25 alone did not recover paraphrased queries, whereas dense retrieval did.",
+      "claim": "BM25 alone failed to recover paraphrased queries, unlike dense retrieval.",
+      "quote": "BM25 alone did not recover paraphrased queries, whereas dense retrieval did"
+    },
+    {
+      "id": "unsup-double-negative-flip",
+      "category": "contradiction_polarity",
+      "should_verify": false,
+      "chunk": "It is not the case that the method fails on long documents.",
+      "claim": "The method fails on long documents.",
+      "quote": "the method fails on long documents"
+    },
+    {
+      "id": "sup-exact-boundary-12char",
+      "category": "clear_entailment",
+      "should_verify": true,
+      "chunk": "Latency dropped sharply after the cache was warmed on startup.",
+      "claim": "Warming the cache on startup sharply reduced latency.",
+      "quote": "Latency dropped sharply after the cache was warmed"
+    },
+    {
+      "id": "unsup-quote-too-short",
+      "category": "fabricated_quote",
+      "should_verify": false,
+      "chunk": "The model improved.",
+      "claim": "The model improved dramatically across every benchmark tested.",
+      "quote": "improved"
+    },
+    {
+      "id": "sup-comparison-direction",
+      "category": "clear_entailment",
+      "should_verify": true,
+      "chunk": "Method A outperformed Method B by 5 points on the shared benchmark.",
+      "claim": "Method A scored 5 points higher than Method B on the shared benchmark.",
+      "quote": "Method A outperformed Method B by 5 points on the shared benchmark"
+    },
+    {
+      "id": "unsup-reversed-comparison",
+      "category": "contradiction_polarity",
+      "should_verify": false,
+      "chunk": "Method A outperformed Method B by 5 points on the shared benchmark.",
+      "claim": "Method B outperformed Method A on the shared benchmark.",
+      "quote": "outperformed Method B by 5 points on the shared benchmark"
+    }
+  ]
+}

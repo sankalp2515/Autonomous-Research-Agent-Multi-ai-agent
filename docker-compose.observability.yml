@@ -32,6 +32,7 @@ services:
       - "host.docker.internal:host-gateway"   # portability: Linux needs this
     volumes:
       - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prom_data:/prometheus
     ports:
       - "9090:9090"

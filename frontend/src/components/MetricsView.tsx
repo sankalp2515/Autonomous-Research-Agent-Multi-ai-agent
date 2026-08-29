@@ -44,39 +44,39 @@ function MetricCard({ m, label, glyph, good }: {
   m: MetricValue; label: string; glyph: string; good: number;
 }) {
   const [open, setOpen] = useState(false);
-  if (m.unit === "seconds") {
-    return (
-      <div className="metric-card latency">
-        <div className="metric-card-head">
-          <span className="metric-glyph">{glyph}</span>
-          <b>{label}</b>
-          <button className="metric-info" onClick={() => setOpen((o) => !o)}>ⓘ</button>
-        </div>
-        <div className="metric-latency-val mono">
-          {m.available ? `${Math.round(m.value ?? 0)}s` : "n/a"}
-          {m.llm_calls ? <span className="metric-latency-sub"> · {m.llm_calls} LLM calls</span> : null}
-        </div>
-        {m.per_node && Object.keys(m.per_node).length > 0 && (
-          <div className="metric-nodes">
-            {(() => {
-              const entries = Object.entries(m.per_node);
-              const max = Math.max(...entries.map(([, v]) => v), 0.001);
-              return entries.map(([node, secs]) => (
-                <div key={node} className="metric-node-row">
-                  <span className="metric-node-name">{node.replace("_", " ")}</span>
-                  <span className="metric-node-bar">
-                    <span className="metric-node-fill" style={{ width: `${(secs / max) * 100}%` }} />
-                  </span>
-                  <span className="mono metric-node-secs">{secs}s</span>
-                </div>
-              ));
-            })()}
-          </div>
-        )}
-        {open && <p className="metric-def">{m.definition}</p>}
-      </div>
-    );
-  }
+  // if (m.unit === "seconds") {
+  //   return (
+  //     <div className="metric-card latency">
+  //       <div className="metric-card-head">
+  //         <span className="metric-glyph">{glyph}</span>
+  //         <b>{label}</b>
+  //         <button className="metric-info" onClick={() => setOpen((o) => !o)}>ⓘ</button>
+  //       </div>
+  //       <div className="metric-latency-val mono">
+  //         {m.available ? `${Math.round(m.value ?? 0)}s` : "n/a"}
+  //         {m.llm_calls ? <span className="metric-latency-sub"> · {m.llm_calls} LLM calls</span> : null}
+  //       </div>
+  //       {m.per_node && Object.keys(m.per_node).length > 0 && (
+  //         <div className="metric-nodes">
+  //           {(() => {
+  //             const entries = Object.entries(m.per_node);
+  //             const max = Math.max(...entries.map(([, v]) => v), 0.001);
+  //             return entries.map(([node, secs]) => (
+  //               <div key={node} className="metric-node-row">
+  //                 <span className="metric-node-name">{node.replace("_", " ")}</span>
+  //                 <span className="metric-node-bar">
+  //                   <span className="metric-node-fill" style={{ width: `${(secs / max) * 100}%` }} />
+  //                 </span>
+  //                 <span className="mono metric-node-secs">{secs}s</span>
+  //               </div>
+  //             ));
+  //           })()}
+  //         </div>
+  //       )}
+  //       {open && <p className="metric-def">{m.definition}</p>}
+  //     </div>
+  //   );
+  // }
   const val = m.value ?? 0;
   const isGood = m.available && val >= good;
   const color = !m.available ? "var(--text-3)" : isGood ? "var(--ok)" : val >= good * 0.7 ? "var(--warn)" : "var(--bad)";

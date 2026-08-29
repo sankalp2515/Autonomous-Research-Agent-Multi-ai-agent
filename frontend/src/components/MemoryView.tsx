@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Empty, Spinner } from "./ui";
+import { Empty, ErrorState, Spinner } from "./ui";
 
 type Mem = { id: string; kind: string; text: string; source_ref: string; created_at: string };
 
@@ -12,13 +12,15 @@ export default function MemoryView({ projectId }: { projectId: string }) {
   const [adding, setAdding] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState(false);
 
   async function refresh() {
     setLoading(true);
+    setLoadError(false);
     try {
       setMems(await api.listMemory(projectId));
     } catch {
-      /* offline */
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -105,6 +107,8 @@ export default function MemoryView({ projectId }: { projectId: string }) {
 
       {loading ? (
         <p><Spinner /> loading memory…</p>
+      ) : loadError ? (
+        <ErrorState title="Couldn’t load memory" onRetry={refresh} />
       ) : mems.length === 0 ? (
         <Empty glyph="◈" title="No memory yet">
           Run some research — each completed run leaves an episodic summary here that

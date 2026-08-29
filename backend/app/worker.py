@@ -30,7 +30,10 @@ async def handle_job(job: dict) -> None:
     payload = job.get("payload", {})
     if kind == "run_pipeline":
         await execute_run(payload["run_id"], scope=payload.get("scope", "all"),
-                          since_year=payload.get("since_year", 0))
+                          since_year=payload.get("since_year", 0),
+                          until_year=payload.get("until_year", 0),
+                          min_citations=payload.get("min_citations", 0),
+                          selected_papers=payload.get("selected_papers") or [])
     elif kind == "import_bibtex":
         from app.services.import_lib import import_bibtex_entries
         await import_bibtex_entries(payload["project_id"], payload["entries"])
@@ -44,6 +47,15 @@ async def handle_job(job: dict) -> None:
         from app.services.monitor import run_monitor
         found = await run_monitor(payload["project_id"])
         logger.info("monitor job complete", extra={"new_alerts": found})
+    elif kind == "send_invite_email":
+        # Durable delivery: queued so a shutdown between HTTP response and send
+        # never loses the email, and the queue's retry/dead-letter applies.
+        import asyncio as _asyncio
+
+        from app.services.mailer import send_org_invite
+        await _asyncio.to_thread(
+            send_org_invite, payload["email"], payload.get("org_name", "workspace"),
+            payload.get("inviter", ""), payload.get("role", "member"))
     else:
         logger.error("unknown job kind", extra={"kind": kind})
 
@@ -113,6 +125,16 @@ async def recover_orphans() -> None:
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
+    # Fail fast at boot if this environment requires the NLI truth layer but has
+    # it off — the worker is where verification actually runs, so it must not
+    # start able to ship quote-only claims. (The gate raises regardless; this
+    # turns a per-run failure into an immediate, obvious boot refusal.)
+    from app.verification.gate import assert_verification_ready
+    assert_verification_ready()
+    # LangSmith: wire LANGCHAIN_* env so the LangGraph pipeline auto-traces the
+    # worker's runs (this is where execute_run actually runs the graph).
+    from app.llm.tracing import init_langsmith
+    init_langsmith()
     from app.core.otel import init_otel
     init_otel(service_name="veriscope-worker")  # httpx/redis + manual node spans
     await init_db()
