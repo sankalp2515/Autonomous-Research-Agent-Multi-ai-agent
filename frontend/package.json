@@ -12,13 +12,13 @@
     "e2e:report": "playwright show-report"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.108.1",
-    "framer-motion": "^13.0.0",
+    "@supabase/supabase-js": "^2.116.0",
+    "framer-motion": "^13.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0",
+    "@playwright/test": "^1.63.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
