@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo Hook — Generic Assistant (prop)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ------------------------------------------------------------------
+   DEMO PROP - a deliberately generic AI assistant UI.
+   Not a real product; no real brand marks. The papers below are fictional.
+   Cool grey/indigo on purpose: the cut to the warm claret product at
+   0:35 should read as a change of world, not a change of screen.
+------------------------------------------------------------------- */
+:root{
+  --bg:#f7f8fa; --panel:#ffffff; --line:#e6e8ee; --line-soft:#eef0f4;
+  --ink:#14161c; --ink-2:#3d4351; --ink-3:#727a8c; --ink-4:#9aa2b2;
+  --brand:#4f5bd5; --brand-soft:#eef0fd;
+  --bad:#c0392f; --bad-soft:#fdeeec;
+  --mark-bad:#ffd9d4;
+  --shadow:0 1px 2px rgba(16,20,32,.05), 0 12px 40px rgba(16,20,32,.10);
+  --ease:cubic-bezier(.22,.61,.36,1);
+}
+*{box-sizing:border-box}
+html{font-size:clamp(13px,0.86vw,18px)}
+body{
+  margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(--ink);
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased; font-size:1rem;
+}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+
+/* ---------------- shell ---------------- */
+.app{display:grid;grid-template-columns:15.5rem 1fr;height:100vh}
+
+.side{
+  border-right:1px solid var(--line); background:#fbfcfd;
+  padding:1.15rem .9rem; display:flex; flex-direction:column; gap:.35rem;
+}
+.brandrow{display:flex;align-items:center;gap:.55rem;padding:.15rem .35rem 1.15rem}
+.glyph{width:1.55rem;height:1.55rem;border-radius:.45rem;background:linear-gradient(140deg,#6b76ea,#3f49b8);
+  display:grid;place-items:center;color:#fff;font-size:.8rem;font-weight:700;letter-spacing:.02em}
+.brandname{font-weight:600;font-size:.95rem;letter-spacing:-.01em}
+.newchat{display:flex;align-items:center;gap:.5rem;padding:.5rem .6rem;border:1px solid var(--line);
+  border-radius:.55rem;background:#fff;font-size:.82rem;color:var(--ink-2);margin-bottom:1rem}
+.sgroup{font-size:.68rem;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-4);padding:.9rem .6rem .35rem}
+.sitem{padding:.42rem .6rem;border-radius:.45rem;font-size:.82rem;color:var(--ink-2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sitem.on{background:#eef0f6;color:var(--ink);font-weight:500}
+.sfoot{margin-top:auto;display:flex;align-items:center;gap:.55rem;padding:.55rem .6rem;font-size:.8rem;color:var(--ink-3)}
+.avatar{width:1.5rem;height:1.5rem;border-radius:50%;background:#d8dce6}
+
+.main{position:relative;overflow:hidden;display:flex;flex-direction:column}
+.topbar{height:3.1rem;border-bottom:1px solid var(--line);display:flex;align-items:center;
+  gap:.6rem;padding:0 1.4rem;background:rgba(255,255,255,.72);flex:0 0 auto}
+.chip{font-size:.74rem;color:var(--ink-2);border:1px solid var(--line);background:#fff;
+  padding:.2rem .55rem;border-radius:999px;display:inline-flex;align-items:center;gap:.35rem}
+.dot{width:.38rem;height:.38rem;border-radius:50%;background:#3aa76d}
+.topspacer{flex:1}
+
+.scroll{flex:1;overflow:hidden;display:flex;justify-content:center}
+.thread{width:min(52rem,90%);padding:2.6rem 0 3rem}
+
+/* ---------------- conversation ---------------- */
+.q{display:flex;gap:.85rem;align-items:flex-start;margin-bottom:2.1rem}
+.qav{width:1.7rem;height:1.7rem;border-radius:50%;background:#dfe3ec;flex:0 0 auto;margin-top:.1rem}
+.qtext{font-size:1.06rem;font-weight:500;line-height:1.5;color:var(--ink)}
+
+.a{display:flex;gap:.85rem;align-items:flex-start}
+.aav{width:1.7rem;height:1.7rem;border-radius:.5rem;flex:0 0 auto;margin-top:.15rem;
+  background:linear-gradient(140deg,#6b76ea,#3f49b8);display:grid;place-items:center;color:#fff;font-size:.72rem;font-weight:700}
+.abody{flex:1;min-width:0}
+.answer{font-family:"Source Serif 4",Georgia,serif;font-size:1.14rem;line-height:1.72;color:#1b1e26}
+.answer p{margin:0 0 1.05rem}
+.answer p:last-child{margin-bottom:0}
+
+/* the sentence the whole demo turns on */
+.claim{position:relative;border-radius:.2rem;transition:background .45s var(--ease),box-shadow .45s var(--ease)}
+
+sup.cite{
+  font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.62em;font-weight:500;
+  vertical-align:.42em;margin-left:.12em;padding:.12em .3em;border-radius:.28em;
+  color:var(--brand);background:var(--brand-soft);cursor:pointer;
+  transition:background .25s var(--ease),color .25s var(--ease),box-shadow .25s var(--ease),transform .25s var(--ease);
+}
+sup.cite:hover{background:#e2e5fb}
+sup.cite.pulse{animation:pulse 1.9s var(--ease) infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(79,91,213,.35)}55%{box-shadow:0 0 0 .42rem rgba(79,91,213,0)}}
+sup.cite.hot{background:#dfe2fb;transform:translateY(-.05em)}
+
+/* sources strip */
+.srcwrap{margin-top:1.9rem;padding-top:1.15rem;border-top:1px solid var(--line-soft)}
+.srclabel{font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-4);margin-bottom:.7rem}
+.srcs{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem}
+.src{border:1px solid var(--line);background:#fff;border-radius:.6rem;padding:.7rem .8rem;
+  transition:border-color .3s var(--ease),box-shadow .3s var(--ease)}
+.src:hover{border-color:#ccd2e4;box-shadow:0 2px 10px rgba(16,20,32,.06)}
+.srcn{font-family:"JetBrains Mono",monospace;font-size:.64rem;color:var(--ink-4);margin-bottom:.3rem}
+.srct{font-size:.78rem;line-height:1.4;font-weight:500;color:var(--ink);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.srcm{font-size:.7rem;color:var(--ink-3);margin-top:.35rem}
+.tools{display:flex;gap:.9rem;margin-top:1.4rem;color:var(--ink-4);font-size:.75rem}
+
+/* composer */
+.composer{flex:0 0 auto;display:flex;justify-content:center;padding:0 0 1.5rem}
+.cbox{width:min(52rem,90%);border:1px solid var(--line);background:#fff;border-radius:.9rem;
+  box-shadow:0 1px 2px rgba(16,20,32,.04);padding:.85rem 1rem;display:flex;align-items:center;gap:.7rem}
+.cph{color:var(--ink-4);font-size:.92rem}
+.csend{margin-left:auto;width:1.9rem;height:1.9rem;border-radius:.55rem;background:#eceef5;display:grid;place-items:center;color:var(--ink-4)}
+
+/* ---------------- paper viewer ---------------- */
+.paper{
+  position:absolute;inset:0 0 0 42%;background:var(--panel);border-left:1px solid var(--line);
+  box-shadow:-24px 0 60px rgba(16,20,32,.13);
+  transform:translateX(102%);transition:transform .62s var(--ease);
+  display:flex;flex-direction:column;z-index:20;
+}
+body.paper-open .paper{transform:translateX(0)}
+.scrim{position:absolute;inset:0;background:rgba(14,17,26,.14);opacity:0;pointer-events:none;
+  transition:opacity .5s var(--ease);z-index:10}
+body.paper-open .scrim{opacity:1}
+
+.phead{padding:1.1rem 1.6rem;border-bottom:1px solid var(--line);flex:0 0 auto}
+.pmeta{display:flex;align-items:center;gap:.5rem;font-size:.7rem;color:var(--ink-3);margin-bottom:.5rem}
+.pbadge{font-family:"JetBrains Mono",monospace;font-size:.64rem;border:1px solid var(--line);
+  border-radius:.3rem;padding:.1rem .35rem;color:var(--ink-2)}
+.ptitle{font-family:"Source Serif 4",Georgia,serif;font-size:1.12rem;line-height:1.35;font-weight:600}
+.pauth{font-size:.76rem;color:var(--ink-3);margin-top:.35rem}
+
+.pscroll{flex:1;overflow:hidden;position:relative;padding:1.7rem 1.6rem 9rem;
+  font-family:"Source Serif 4",Georgia,serif;font-size:.95rem;line-height:1.78;color:#242832}
+.pscroll h4{font-family:Inter,sans-serif;font-size:.7rem;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--ink-4);margin:1.9rem 0 .6rem;font-weight:600}
+.pscroll h4:first-child{margin-top:0}
+.pscroll p{margin:0 0 1rem}
+.pg{font-family:"JetBrains Mono",monospace;font-size:.6rem;color:var(--ink-4);
+  border-top:1px dashed var(--line);padding-top:.45rem;margin:2rem 0 1.4rem}
+
+/* the highlight */
+.hl{border-radius:.15rem;
+  background:linear-gradient(90deg,var(--mark-bad),var(--mark-bad)) 0 0/0% 100% no-repeat;
+  transition:background-size .85s var(--ease);
+  box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:.06em 0}
+body.hl-on .hl{background-size:100% 100%}
+.hlmark{position:absolute;left:0;top:0;bottom:0;width:.18rem;background:var(--bad);border-radius:2px;
+  opacity:0;transform:scaleY(.4);transform-origin:top;
+  transition:opacity .5s var(--ease) .15s,transform .6s var(--ease) .15s}
+body.hl-on .hlmark{opacity:1;transform:scaleY(1)}
+.hlwrap{position:relative;padding-left:1rem;margin-left:-1rem}
+
+/* verdict card */
+.verdict{
+  position:absolute;left:1.6rem;right:1.6rem;bottom:1.4rem;background:#fff;border:1px solid var(--line);
+  border-radius:.7rem;box-shadow:var(--shadow);padding:.95rem 1.05rem;
+  opacity:0;transform:translateY(.9rem);transition:opacity .5s var(--ease),transform .5s var(--ease);
+  z-index:5;font-family:Inter,sans-serif}
+body.verdict-on .verdict{opacity:1;transform:none}
+.vrow{display:flex;gap:.75rem;align-items:flex-start;padding:.42rem 0}
+.vtag{font-family:"JetBrains Mono",monospace;font-size:.6rem;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-3);width:4.6rem;flex:0 0 auto;padding-top:.14rem}
+.vtxt{font-size:.8rem;line-height:1.5;color:var(--ink-2)}
+.vtxt em{font-style:normal;background:var(--mark-bad);border-radius:.15rem;padding:.02em .18em}
+.vsplit{border-top:1px solid var(--line-soft);margin:.35rem 0}
+.vres{display:flex;gap:1.3rem;padding-top:.55rem;font-size:.75rem}
+.vres b{font-weight:600}
+.ok{color:#2f7d55}.no{color:var(--bad)}
+
+/* ---------------- final beat: the zoom ---------------- */
+/* scale about the reading column, never the window corner: the claim must
+   stay whole on screen at full zoom */
+.zoomer{transition:transform 1.05s var(--ease);transform-origin:50% 18%;will-change:transform}
+body.b4 .zoomer{transform:scale(1.26)}
+.dimmable{transition:opacity .8s var(--ease),filter .8s var(--ease)}
+body.b4 .dimmable{opacity:.13;filter:blur(1.5px)}
+body.b4 .side,body.b4 .topbar,body.b4 .composer{opacity:.16;filter:blur(1px);
+  transition:opacity .8s var(--ease),filter .8s var(--ease)}
+.answer{transition:color .8s var(--ease)}
+body.b4 .answer{color:#c3c6cf}
+body.b4 .claim{color:#1b1e26;background:#fbe3df;box-shadow:0 0 0 .5rem #fbe3df}
+body.b4 .claim b{box-shadow:inset 0 -.12em 0 rgba(192,57,47,.55)}
+body.b4 sup.cite{background:#f4d3cd;color:var(--bad)}
+
+/* ---------------- presenter HUD ---------------- */
+.hud{position:fixed;right:1rem;bottom:1rem;z-index:60;display:flex;align-items:center;gap:.6rem;
+  background:rgba(20,22,28,.86);color:#fff;border-radius:999px;padding:.42rem .5rem .42rem .95rem;
+  font-size:.72rem;box-shadow:0 8px 30px rgba(0,0,0,.28);
+  opacity:0;transform:translateY(.4rem);transition:opacity .35s var(--ease),transform .35s var(--ease);
+  pointer-events:none}
+.hud.show{opacity:1;transform:none;pointer-events:auto}
+.hud b{font-weight:600}
+.hud .k{font-family:"JetBrains Mono",monospace;font-size:.65rem;opacity:.6}
+.hbtn{width:1.6rem;height:1.6rem;border-radius:50%;background:rgba(255,255,255,.12);
+  display:grid;place-items:center;font-size:.8rem}
+.hbtn:hover{background:rgba(255,255,255,.22)}
+.beatname{opacity:.78}
+@media (prefers-reduced-motion:reduce){*{transition-duration:.001ms!important;animation:none!important}}
+</style>
+</head>
+<body>
+
+<div class="app zoomer">
+  <!-- sidebar -->
+  <aside class="side dimmable">
+    <div class="brandrow"><div class="glyph">A</div><div class="brandname">Assistant</div></div>
+    <div class="newchat"><span>+</span><span>New chat</span></div>
+    <div class="sgroup">Today</div>
+    <div class="sitem on">LLMs in literature reviews</div>
+    <div class="sitem">Screening automation &mdash; cost model</div>
+    <div class="sitem">Draft: grant methods section</div>
+    <div class="sgroup">Previous 7 days</div>
+    <div class="sitem">Retrieval eval metrics explained</div>
+    <div class="sitem">Summarise: 4 uploaded PDFs</div>
+    <div class="sitem">Meta-analysis vs scoping review</div>
+    <div class="sfoot"><div class="avatar"></div><span>Research workspace</span></div>
+  </aside>
+
+  <!-- main -->
+  <main class="main">
+    <div class="topbar dimmable">
+      <div class="chip"><span class="dot"></span>Research mode</div>
+      <div class="chip">Web + papers</div>
+      <div class="topspacer"></div>
+      <div class="chip">Share</div>
+    </div>
+
+    <div class="scroll">
+      <div class="thread">
+        <div class="q dimmable">
+          <div class="qav"></div>
+          <div class="qtext">Do large language models actually improve scientific literature reviews?</div>
+        </div>
+
+        <div class="a">
+          <div class="aav">A</div>
+          <div class="abody">
+            <div class="answer">
+              <p><span class="claim">Recent studies show that large language model assistants
+              <b>significantly improve</b> both the speed and the reliability of scientific literature
+              reviews.<sup class="cite pulse" id="c1">1</sup></span> In controlled evaluations,
+              LLM-assisted screening cut reviewer workload by roughly 40&ndash;60% while preserving
+              inclusion accuracy, and automated synthesis pipelines produced drafts rated comparable
+              to those written by domain experts.<sup class="cite" id="c2">2</sup></p>
+
+              <p class="dimmable">The effect appears consistent across biomedical and computer-science corpora, which
+              suggests the gains are general rather than domain-specific.<sup class="cite" id="c3">3</sup>
+              Reported limitations centre on prompt sensitivity and on the cost of validating model
+              output at scale, rather than on whether the benefit exists.</p>
+            </div>
+
+            <div class="srcwrap dimmable">
+              <div class="srclabel">Sources</div>
+              <div class="srcs">
+                <div class="src">
+                  <div class="srcn">[1]</div>
+                  <div class="srct">Human&ndash;AI Screening in Systematic Reviews: A Randomised Evaluation</div>
+                  <div class="srcm">Aldridge et al. &middot; 2024</div>
+                </div>
+                <div class="src">
+                  <div class="srcn">[2]</div>
+                  <div class="srct">Automated Synthesis Drafting for Biomedical Evidence Reviews</div>
+                  <div class="srcm">Verhoeven &amp; Park &middot; 2025</div>
+                </div>
+                <div class="src">
+                  <div class="srcn">[3]</div>
+                  <div class="srct">Benchmarking Retrieval-Augmented Review Assistants Across Domains</div>
+                  <div class="srcm">Okafor et al. &middot; 2025</div>
+                </div>
+              </div>
+              <div class="tools"><span>&#8635; Regenerate</span><span>&#9109; Copy</span><span>&uarr; Export</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer"><div class="cbox">
+      <span class="cph">Ask a follow-up&hellip;</span><div class="csend">&uarr;</div>
+    </div></div>
+
+    <!-- paper viewer -->
+    <div class="scrim"></div>
+    <section class="paper" id="paper" aria-hidden="true">
+      <div class="phead">
+        <div class="pmeta">
+          <span class="pbadge">SOURCE [1]</span>
+          <span>Journal of Research Synthesis Methods &middot; 2024</span>
+          <span>&middot;</span><span>doi:10.4193/jrsm.2024.0117</span>
+        </div>
+        <div class="ptitle">Human&ndash;AI Screening in Systematic Reviews: A Randomised Evaluation</div>
+        <div class="pauth">M. Aldridge, S. Whitlock, J. Ferreira, N. Bhatt &mdash; Centre for Evidence Methods</div>
+      </div>
+
+      <div class="pscroll" id="pscroll">
+        <h4>Abstract</h4>
+        <p>Large language models are increasingly proposed as assistants for title-and-abstract
+        screening. We report a randomised evaluation in which twelve reviewers screened 2,400
+        abstracts across two clinical topics, with and without model assistance, measuring both
+        time-on-task and the accuracy of inclusion decisions against a consensus reference set.</p>
+
+        <h4>3. Methods</h4>
+        <p>Reviewers were block-randomised to assisted and unassisted arms. The assisted arm received
+        a model-generated relevance score and a two-sentence rationale for each abstract. Decisions
+        were recorded with per-abstract timing. The reference standard was established by two senior
+        reviewers with a third adjudicating disagreements, blinded to arm allocation.</p>
+        <p>Because reviewers were drawn from a single review team, we treated the study as a
+        within-team efficiency evaluation and pre-registered time-on-task as the primary endpoint.
+        Decision quality was a secondary endpoint, and the trial was not powered to detect small
+        differences in it.</p>
+
+        <div class="pg">&mdash; page 7 &mdash;</div>
+        <h4>4. Results</h4>
+        <p>Median screening time fell from 41.5 to 24.8 minutes per 100 abstracts in the assisted arm
+        (a 40.2% reduction; 95% CI 33.1&ndash;46.8), and the effect was stable across both topics.</p>
+
+        <div class="hlwrap" id="hlwrap">
+          <span class="hlmark"></span>
+          <p><span class="hl">However, the reduction in workload did not translate into improved
+          decision quality. Inclusion accuracy was 82.1% in the assisted arm and 84.6% in the
+          unassisted arm &mdash; a difference that was not statistically significant (p = 0.31), and
+          whose confidence interval is compatible with a small decrease in accuracy under assistance.
+          We therefore make no claim that model assistance improves the reliability of screening; our
+          results speak to speed alone.</span></p>
+        </div>
+
+        <p>Sensitivity analyses excluding the two fastest reviewers did not change the direction of
+        either result.</p>
+
+        <h4>5. Discussion</h4>
+        <p>These findings should not be generalised beyond title-and-abstract screening. Full-text
+        appraisal, data extraction and synthesis were outside the scope of this evaluation, and the
+        single-team design limits transportability to other review contexts.</p>
+        <p>We note that efficiency gains in screening are frequently reported alongside claims of
+        improved review quality. Our data do not support that pairing.</p>
+      </div>
+
+      <div class="verdict">
+        <div class="vrow">
+          <div class="vtag">Answer</div>
+          <div class="vtxt">&ldquo;&hellip;significantly improve both the speed <em>and the reliability</em>
+          of scientific literature reviews.&rdquo;</div>
+        </div>
+        <div class="vsplit"></div>
+        <div class="vrow">
+          <div class="vtag">Paper p.7</div>
+          <div class="vtxt">&ldquo;&hellip;<em>did not translate into improved decision quality</em> &hellip;
+          not statistically significant (p = 0.31) &hellip; <em>we make no claim</em> that model
+          assistance improves the reliability of screening.&rdquo;</div>
+        </div>
+        <div class="vres">
+          <span class="ok"><b>Speed</b> &mdash; supported</span>
+          <span class="no"><b>Reliability</b> &mdash; contradicted by the cited source</span>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- presenter HUD (auto-hides; press H to toggle) -->
+<div class="hud" id="hud">
+  <span class="k">1/5</span><b class="beatname" id="beatname">The answer</b>
+  <button class="hbtn" id="prev" title="Back (left arrow)">&lsaquo;</button>
+  <button class="hbtn" id="next" title="Advance (space / right arrow)">&rsaquo;</button>
+  <button class="hbtn" id="reset" title="Reset (R)">&#8635;</button>
+</div>
+
+<script>
+(function(){
+  var body=document.body,
+      paper=document.getElementById('paper'),
+      pscroll=document.getElementById('pscroll'),
+      hlwrap=document.getElementById('hlwrap'),
+      c1=document.getElementById('c1'),
+      hud=document.getElementById('hud'),
+      beatname=document.getElementById('beatname'),
+      counter=hud.querySelector('.k');
+
+  var BEATS=[
+    'The answer',             // 0  "Would you trust this?"
+    'Open source [1]',        // 1  "But look at what the paper actually says."
+    'What it actually says',  // 2  "It doesn't support this claim."
+    'Back to the answer',     // 3  "The citation isn't fake..."
+    'The problem'             // 4  "Getting an answer is easy..."
+  ];
+  var i=0, timers=[];
+  function clearTimers(){ timers.forEach(clearTimeout); timers=[]; }
+  function at(ms,fn){ timers.push(setTimeout(fn,ms)); }
+
+  // eased scroll of the paper column down to the passage
+  function scrollToPassage(dur){
+    var target=Math.max(0, hlwrap.offsetTop - pscroll.clientHeight*0.34);
+    var from=pscroll.scrollTop, delta=target-from, t0=performance.now();
+    function step(now){
+      var p=Math.min(1,(now-t0)/dur), e=1-Math.pow(1-p,3);
+      pscroll.scrollTop=from+delta*e;
+      if(p<1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  function render(from){
+    clearTimers();
+    counter.textContent=(i+1)+'/'+BEATS.length;
+    beatname.textContent=BEATS[i];
+
+    body.classList.toggle('b4', i>=4);
+    c1.classList.toggle('pulse', i===0);
+    c1.classList.toggle('hot', i>=1 && i<=2);
+
+    if(i>=1 && i<=2){
+      body.classList.add('paper-open');
+      paper.setAttribute('aria-hidden','false');
+      if(from<1){                    // opening fresh: land, scroll, then mark
+        pscroll.scrollTop=0;
+        body.classList.remove('hl-on');
+        at(560,function(){ scrollToPassage(900); });
+        at(1180,function(){ body.classList.add('hl-on'); });
+      } else {
+        body.classList.add('hl-on');
+      }
+    } else {
+      body.classList.remove('paper-open');
+      paper.setAttribute('aria-hidden','true');
+      at(680,function(){
+        if(!body.classList.contains('paper-open')){
+          body.classList.remove('hl-on');
+          pscroll.scrollTop=0;
+        }
+      });
+    }
+    body.classList.toggle('verdict-on', i===2);
+  }
+
+  function go(n){ var from=i; i=Math.max(0,Math.min(BEATS.length-1,n)); render(from); }
+  function next(){ go(i+1); }
+  function prev(){ go(i-1); }
+
+  // the presenter really clicks citation [1]
+  c1.addEventListener('click',function(e){ e.stopPropagation(); if(i===0){ go(1); } else { next(); } });
+  document.getElementById('next').addEventListener('click',function(e){ e.stopPropagation(); next(); });
+  document.getElementById('prev').addEventListener('click',function(e){ e.stopPropagation(); prev(); });
+  document.getElementById('reset').addEventListener('click',function(e){ e.stopPropagation(); go(0); });
+  document.addEventListener('click',function(e){ if(!hud.contains(e.target)) next(); });
+  document.addEventListener('keydown',function(e){
+    if(e.key===' '||e.key==='ArrowRight'||e.key==='PageDown'||e.key==='Enter'){ e.preventDefault(); next(); }
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){ e.preventDefault(); prev(); }
+    else if(e.key==='r'||e.key==='R'){ go(0); }
+    else if(e.key==='h'||e.key==='H'){ hud.classList.toggle('show'); }
+    else if(e.key>='1'&&e.key<='5'){ go(parseInt(e.key,10)-1); }
+  });
+
+  // HUD auto-hides so it never lands in the recording
+  var hideT;
+  function bump(){ hud.classList.add('show'); clearTimeout(hideT);
+    hideT=setTimeout(function(){ hud.classList.remove('show'); },2200); }
+  document.addEventListener('mousemove',bump);
+  bump();
+
+  render(0);
+})();
+</script>
+</body>
+</html>
