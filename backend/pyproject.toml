@@ -76,6 +76,12 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.lint]
+# Pinned on purpose. With no `select`, the rule set is whatever the installed
+# ruff defaults to, and CI installs the newest release (0.17 enables ~400 more
+# findings than 0.15 did), so the lint gate moved without a single code change.
+select = ["E4", "E7", "E9", "F"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

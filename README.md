@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sankalp2515/Autonomous-Research-Agent-Multi-ai-agent-/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sankalp2515/Autonomous-Research-Agent-Multi-ai-agent-/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white"></a>
+  <a href="https://github.com/sankalp2515/Autonomous-Research-Agent-Multi-ai-agent/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sankalp2515/Autonomous-Research-Agent-Multi-ai-agent/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white"></a>
   <img alt="Python" src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-React%2018-3178C6?logo=typescript&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white">
