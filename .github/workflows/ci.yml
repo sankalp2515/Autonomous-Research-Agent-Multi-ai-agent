@@ -196,7 +196,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Scan backend image (Trivy)
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: veriscope-backend:ci
           severity: HIGH,CRITICAL
@@ -204,7 +204,7 @@ jobs:
           exit-code: "0" # report, don't block — base-image CVEs land without us
           format: table
       - name: Scan frontend image (Trivy)
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: veriscope-frontend:ci
           severity: HIGH,CRITICAL
