@@ -64,19 +64,42 @@ PROVIDERS: dict[str, ProviderSpec] = {
 }
 
 
-def provider_configured(name: str) -> bool:
+def provider_keys(name: str) -> list[str]:
+    """Every API key configured for this provider, primary first.
+
+    Duplicates are dropped: two lanes sharing one real key would each be given a
+    full token bucket and together overrun the provider's actual limit, which
+    turns a copy-paste in .env into a 429 storm. Order is stable so lane 0 is
+    always the primary key.
+    """
+    settings = get_settings()
     spec = PROVIDERS[name]
-    return bool(getattr(get_settings(), spec.api_key_setting))
+    raw = [getattr(settings, spec.api_key_setting, "")]
+    raw += [getattr(settings, f"{spec.api_key_setting}_{n}", "") for n in (2, 3, 4)]
+    seen: set[str] = set()
+    keys: list[str] = []
+    for k in raw:
+        k = (k or "").strip()
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+    return keys
+
+
+def provider_configured(name: str) -> bool:
+    return bool(provider_keys(name))
 
 
 def provider_rpm(name: str) -> int:
+    """RPM budget PER KEY — the provider enforces its limit per key, so N keys
+    give N buckets of this size rather than N shares of one."""
     spec = PROVIDERS[name]
     return int(getattr(get_settings(), spec.rpm_setting))
 
 
 @retry_llm
-async def _call_gemini(prompt: str, *, system: str, temperature: float,
-                       max_tokens: int) -> LLMResult:
+async def _call_gemini(api_key: str, prompt: str, *, system: str,
+                       temperature: float, max_tokens: int) -> LLMResult:
     settings = get_settings()
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -89,7 +112,7 @@ async def _call_gemini(prompt: str, *, system: str, temperature: float,
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(url, json=body, params={"key": settings.gemini_api_key})
+        resp = await client.post(url, json=body, params={"key": api_key})
     if resp.status_code == 429:
         raise RateLimitedError("gemini rate limited")
     resp.raise_for_status()
@@ -110,10 +133,10 @@ async def _call_gemini(prompt: str, *, system: str, temperature: float,
 
 
 @retry_llm
-async def _call_openai_compatible(spec: ProviderSpec, prompt: str, *, system: str,
-                                  temperature: float, max_tokens: int) -> LLMResult:
+async def _call_openai_compatible(spec: ProviderSpec, api_key: str, prompt: str, *,
+                                  system: str, temperature: float,
+                                  max_tokens: int) -> LLMResult:
     settings = get_settings()
-    api_key = getattr(settings, spec.api_key_setting)
     model = getattr(settings, spec.model_setting)
     messages = []
     if system:
@@ -148,12 +171,16 @@ async def _call_openai_compatible(spec: ProviderSpec, prompt: str, *, system: st
 
 
 async def call_provider(name: str, prompt: str, *, system: str = "",
-                        temperature: float = 0.2, max_tokens: int = 4096) -> LLMResult:
+                        temperature: float = 0.2, max_tokens: int = 4096,
+                        key_index: int = 0) -> LLMResult:
+    """One call on one LANE: a provider plus which of its keys to spend."""
     spec = PROVIDERS[name]
-    if not getattr(get_settings(), spec.api_key_setting):
+    keys = provider_keys(name)
+    if not keys:
         raise ExternalServiceError(f"{name} API key not configured")
+    api_key = keys[key_index % len(keys)]
     if name == "gemini":
-        return await _call_gemini(prompt, system=system, temperature=temperature,
-                                  max_tokens=max_tokens)
-    return await _call_openai_compatible(spec, prompt, system=system,
+        return await _call_gemini(api_key, prompt, system=system,
+                                  temperature=temperature, max_tokens=max_tokens)
+    return await _call_openai_compatible(spec, api_key, prompt, system=system,
                                          temperature=temperature, max_tokens=max_tokens)

@@ -10,6 +10,10 @@ Roles are strict (the v1 lesson):
 """
 
 import asyncio
+import base64
+import hashlib
+import json
+import struct
 import threading
 from functools import lru_cache
 
@@ -129,6 +133,40 @@ def _local_embed(texts: list[str]) -> list[list[float]]:
 
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Vectors for `texts`, memoized by content.
+
+    Embedding is the largest single cost in ingest (measured: 20.4s of a 36.6s
+    paper) and the tier is serialized, so re-ingesting a paper the system has
+    already read — the same PDF entering a second project, a re-run of the same
+    question — used to pay full price for byte-identical chunks."""
+    if not texts:
+        return []
+    keys = [_memo_key("emb", t) for t in texts]
+    cached = await _memo_get(keys)
+    out: list[list[float] | None] = [None] * len(texts)
+    todo: list[int] = []
+    for i, raw in enumerate(cached):
+        vec = _unpack_vector(raw)
+        if vec is None:
+            todo.append(i)
+        else:
+            out[i] = vec
+    if todo:
+        fresh = await _embed_texts_uncached([texts[i] for i in todo])
+        # A length mismatch means the tier returned something we cannot align
+        # to our inputs. Fall back wholesale rather than pair a chunk with
+        # another chunk's vector, which would corrupt retrieval silently.
+        if len(fresh) != len(todo):
+            return await _embed_texts_uncached(texts)
+        writes: dict[str, str] = {}
+        for i, vec in zip(todo, fresh):
+            out[i] = vec
+            writes[keys[i]] = _pack_vector(vec)
+        await _memo_set(writes)
+    return [v if v is not None else [] for v in out]
+
+
+async def _embed_texts_uncached(texts: list[str]) -> list[list[float]]:
     if _remote_enabled():
         # BOUND THE REQUEST, NOT JUST THE QUEUE. A document's chunks were sent
         # as ONE call, so request duration scaled with paper length — and this
@@ -162,6 +200,48 @@ def _local_rerank(query: str, passages: list[str]) -> list[float]:
 
 
 async def rerank(query: str, passages: list[str]) -> list[float]:
+    """Cross-encoder relevance scores, memoized by (query, passage).
+
+    THE MEMO THIS TIER WAS MISSING. Embedding and NLI were memoized; rerank was
+    not, and it sits on BOTH hot paths — `dimension.py` reranks candidates while
+    extracting each paper, and `hybrid.py` reranks again while drafting each
+    section. It is the same CPU-only, lock-serialized cross-encoder, so on a
+    re-run of an identical corpus it was re-scoring identical (query, passage)
+    pairs from scratch. Measured on a warm run of an already-read corpus:
+    extraction 207s and drafting 178s, of which the model calls accounted for
+    well under half — the remainder was this.
+
+    Scored per PASSAGE rather than per batch, so a section that shares most of
+    its candidates with a previous run pays only for the ones that are new."""
+    if not passages:
+        return []
+    keys = [_memo_key("rrk", query, p) for p in passages]
+    cached = await _memo_get(keys)
+    out: list[float | None] = [None] * len(passages)
+    todo: list[int] = []
+    for i, raw in enumerate(cached):
+        try:
+            out[i] = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            out[i] = None
+        if out[i] is None:
+            todo.append(i)
+    if todo:
+        fresh = await _rerank_uncached(query, [passages[i] for i in todo])
+        # A length mismatch means we cannot align scores to passages; fall back
+        # wholesale rather than score a passage with another's number, which
+        # would silently reorder retrieval.
+        if len(fresh) != len(todo):
+            return await _rerank_uncached(query, passages)
+        writes: dict[str, str] = {}
+        for i, score in zip(todo, fresh):
+            out[i] = float(score)
+            writes[keys[i]] = repr(float(score))
+        await _memo_set(writes)
+    return [0.0 if v is None else v for v in out]
+
+
+async def _rerank_uncached(query: str, passages: list[str]) -> list[float]:
     if not passages:
         return []
     if _remote_enabled():
@@ -191,13 +271,118 @@ async def nli_entailment(premise: str, hypothesis: str) -> tuple[str, float]:
     return await asyncio.to_thread(_run)
 
 
+# ── Inference memo (content-addressed, Redis) ────────────────────────────
+#
+# Embedding and NLI are DETERMINISTIC in their inputs, and this tier is
+# CPU-only and lock-serialized — on the reference box it is the single largest
+# cost in a run (measured: ~35s for one paper's extraction gate, ~13s to embed
+# 40 chunks). So results are memoized by CONTENT.
+#
+# This is not a shortcut around the gate. A cached verdict is the verdict that
+# exact (premise, hypothesis) pair produced, and every claim is still scored
+# before it can ship. What it buys is that a paper re-read in a SECOND project,
+# or a claim re-verified after a replan, does not pay for the same forward pass
+# twice.
+#
+# Deliberate: a "skipped" verdict is NEVER cached (it describes the process,
+# not the pair — caching it would pin a degraded gate in place), and every read
+# and write is best-effort, so a Redis outage costs speed and can never change
+# a verdict or fail a run.
+
+_MEMO_TTL = 60 * 60 * 24 * 30       # the key changes whenever the text does
+
+
+def _memo_key(prefix: str, *parts: str) -> str:
+    h = hashlib.sha256(("\x00".join(parts)).encode("utf-8", "replace")).hexdigest()
+    return f"infmemo:{prefix}:{h}"
+
+
+async def _memo_get(keys: list[str]) -> list[str | None]:
+    if not keys:
+        return []
+    try:
+        from app.stores.redis_store import get_redis
+        return list(await get_redis().mget(keys))
+    except Exception:
+        return [None] * len(keys)
+
+
+async def _memo_set(pairs: dict[str, str]) -> None:
+    if not pairs:
+        return
+    try:
+        from app.stores.redis_store import get_redis
+        pipe = get_redis().pipeline()
+        for k, v in pairs.items():
+            pipe.set(k, v, ex=_MEMO_TTL)
+        await pipe.execute()
+    except Exception:
+        pass
+
+
+def _pack_vector(vec: list[float]) -> str:
+    """base64 of float32: ~2KB per 384-dim vector against ~9KB as JSON. base64
+    rather than raw bytes because the shared Redis client runs with
+    decode_responses=True, and raw float32 is not valid UTF-8 — it would come
+    back corrupted, which for a vector means silently WRONG retrieval rather
+    than a visible error."""
+    return base64.b64encode(struct.pack(f"<{len(vec)}f", *vec)).decode("ascii")
+
+
+def _unpack_vector(raw) -> list[float] | None:
+    if not raw:
+        return None
+    try:
+        blob = base64.b64decode(raw, validate=True)
+        if not blob or len(blob) % 4:
+            return None
+        return list(struct.unpack(f"<{len(blob) // 4}f", blob))
+    except Exception:
+        return None
+
+
 async def nli_entailment_batch(
     pairs: list[tuple[str, str]]
 ) -> list[tuple[str, float]]:
     """Batched entailment: one forward pass (one lock acquisition) for many
     (premise, hypothesis) pairs, instead of N serialized single calls. The
     verification gate scores a whole section's claims at once through here —
-    the single biggest inference-throughput win on the hot path."""
+    the single biggest inference-throughput win on the hot path.
+
+    Verdicts are memoized by content (see the memo block above): a pair already
+    scored is not scored again, and only the unseen pairs reach the model."""
+    if not pairs:
+        return []
+
+    keys = [_memo_key("nli", p, h) for p, h in pairs]
+    cached = await _memo_get(keys)
+    out: list[tuple[str, float] | None] = [None] * len(pairs)
+    todo: list[int] = []
+    for i, raw in enumerate(cached):
+        if raw is None:
+            todo.append(i)
+            continue
+        try:
+            label, score = json.loads(raw)
+            out[i] = (str(label), float(score))
+        except Exception:
+            todo.append(i)
+    if todo:
+        scored = await _nli_entailment_batch_uncached([pairs[i] for i in todo])
+        if len(scored) != len(todo):
+            return await _nli_entailment_batch_uncached(pairs)
+        fresh: dict[str, str] = {}
+        for i, verdict in zip(todo, scored):
+            out[i] = verdict
+            if verdict[0] != "skipped":
+                fresh[keys[i]] = json.dumps([verdict[0], verdict[1]])
+        await _memo_set(fresh)
+    return [o if o is not None else ("skipped", 0.0) for o in out]
+
+
+async def _nli_entailment_batch_uncached(
+    pairs: list[tuple[str, str]]
+) -> list[tuple[str, float]]:
     if not pairs:
         return []
     # Remote FIRST. This used to call _nli() before the remote check, so a

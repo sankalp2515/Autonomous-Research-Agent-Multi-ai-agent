@@ -111,6 +111,28 @@ _NAMED = re.compile(r"\b(?:[A-Z][a-z0-9]+[A-Z][A-Za-z0-9-]*|[A-Z]{2,}[A-Za-z0-9-
 _MIN_SPECIFIC_WORDS = 12
 
 
+def scoping_question(query: str) -> str:
+    """One clarifying question, derived in code from what the request omits.
+
+    Used when a pause is REQUIRED but the model volunteered nothing — it is
+    told to stay quiet unless a request is genuinely ambiguous, and a request
+    that is merely broad is not. A generic "can you be more specific?" teaches
+    a researcher that the pause is noise, so each branch asks for the signal
+    the query is actually missing.
+    """
+    text = (query or "").strip()
+    named = len(_NAMED.findall(text)) >= 2
+    measured = bool(_MEASURED.search(text))
+    if not named and not measured:
+        return ("Which systems or settings should this cover, and what result "
+                "would count as an answer - which measurement or outcome?")
+    if not named:
+        return "Which systems, models or settings should this review compare?"
+    if not measured:
+        return "Which measurement or outcome should decide the answer here?"
+    return "Which part of this question should the review answer first?"
+
+
 def query_specificity(query: str) -> tuple[str, list[str]]:
     """Classify a request as 'specific' | 'underspecified', with the signals.
 

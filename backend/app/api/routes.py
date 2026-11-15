@@ -988,6 +988,17 @@ class EntityRef(BaseModel):
     id: str = Field(max_length=64)
 
 
+class ChatTurnRef(BaseModel):
+    """One earlier turn, sent so a follow-up can be resolved against it.
+
+    The client holds the conversation; the server holds the corpus. Sending the
+    last few turns back is what turns "why?" into a retrievable question - see
+    `ask_intent.resolve_followup`. Bounded hard, because history is model input.
+    """
+    question: str = Field(default="", max_length=2000)
+    answer: str = Field(default="", max_length=4000)
+
+
 class ChatRequest(BaseModel):
     project_id: str
     question: str = Field(min_length=3, max_length=2000)
@@ -995,6 +1006,42 @@ class ChatRequest(BaseModel):
     # One-off chat context: papers / claims / answers selected anywhere in the
     # app. Resolved to a grounding scope; the chat is still fully gate-verified.
     entity_refs: list[EntityRef] | None = Field(default=None, max_length=50)
+    # Preceding turns of THIS conversation, newest last.
+    history: list[ChatTurnRef] | None = Field(default=None, max_length=12)
+
+
+def _chat_surface(body: ChatRequest) -> str:
+    return "paper" if body.document_id else ("selection" if body.entity_refs else "corpus")
+
+
+async def _run_chat(session: AsyncSession, body: ChatRequest, *, on_progress=None):
+    """Shared by the plain and streaming endpoints so they cannot drift."""
+    result = await grounded_chat(
+        session, body.project_id, body.question,
+        document_ids=[body.document_id] if body.document_id else None,
+        entity_refs=[r.model_dump() for r in body.entity_refs] if body.entity_refs else None,
+        history=[t.model_dump() for t in body.history] if body.history else None,
+        on_progress=on_progress,
+    )
+    payload = result.as_dict()
+    # Tag the persisted answer with its surface so only main-Ask ("corpus")
+    # history is restored later (not paper-drawer or selection chats), and keep
+    # the conversational envelope so a restored turn is the answer that was
+    # read rather than a reconstruction of it.
+    from app.db.models import Answer
+    ans = await session.get(Answer, result.answer_id)
+    if ans is not None:
+        ans.kind = _chat_surface(body)
+        ans.meta = {
+            "segments": payload.get("segments", []),
+            "answer_kind": payload.get("answer_kind", ""),
+            "refusal_kind": payload.get("refusal_kind", ""),
+            "looked_at": payload.get("looked_at", []),
+            "suggestions": payload.get("suggestions", []),
+            "sources": payload.get("sources", []),
+            "resolved_question": payload.get("resolved_question", ""),
+        }
+    return payload
 
 
 @router.post("/chat")
@@ -1003,19 +1050,66 @@ async def chat(
     session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
 ):
     await _get_project(session, body.project_id, user)
-    result = await grounded_chat(
-        session, body.project_id, body.question,
-        document_ids=[body.document_id] if body.document_id else None,
-        entity_refs=[r.model_dump() for r in body.entity_refs] if body.entity_refs else None,
-    )
-    # Tag the persisted answer with its surface so only main-Ask ("corpus")
-    # history is restored later (not paper-drawer or selection chats).
-    from app.db.models import Answer
-    kind = "paper" if body.document_id else ("selection" if body.entity_refs else "corpus")
-    ans = await session.get(Answer, result.answer_id)
-    if ans is not None:
-        ans.kind = kind
-    return result.as_dict()
+    return await _run_chat(session, body)
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    body: ChatRequest,
+    session: AsyncSession = Depends(get_session), user: str = Depends(current_user),
+):
+    """The same answer, with the PIPELINE streamed while it is produced.
+
+    A gated answer cannot be token-streamed: the gate runs after generation, so
+    streaming raw tokens would put ungated text in front of the reader and break
+    G1/G2. What streams instead is the work - searching, N passages from M
+    documents, drafting, verifying, K of N verified. That is honest, and it is
+    the part actually worth watching.
+
+    Every event is typed AT THE PUBLISH SITE with a `kind`; the client groups and
+    colours on `kind` alone and must never pattern-match our prose.
+    """
+    import asyncio
+    import json as _json
+
+    from fastapi.responses import StreamingResponse
+
+    await _get_project(session, body.project_id, user)
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def publish(event: dict) -> None:
+        await queue.put(event)
+
+    async def gen():
+        task = asyncio.ensure_future(_run_chat(session, body, on_progress=publish))
+        try:
+            while True:
+                drain = asyncio.ensure_future(queue.get())
+                done, _pending = await asyncio.wait(
+                    {drain, task}, return_when=asyncio.FIRST_COMPLETED, timeout=30)
+                if drain in done:
+                    yield "data: " + _json.dumps(drain.result()) + "\n\n"
+                    continue
+                drain.cancel()
+                if task in done:
+                    break
+                yield ": keep-alive\n\n"  # a comment frame, never a progress event
+            while not queue.empty():
+                yield "data: " + _json.dumps(queue.get_nowait()) + "\n\n"
+            payload = task.result()
+            yield "event: answer\ndata: " + _json.dumps(payload) + "\n\n"
+        except Exception as exc:  # a stream must end with a verdict, never silence
+            yield ("event: error\ndata: "
+                   + _json.dumps({"kind": "error", "message": str(exc)[:300]})
+                   + "\n\n")
+        finally:
+            if not task.done():
+                task.cancel()
+            yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 @router.get("/projects/{project_id}/answers")
@@ -1069,12 +1163,32 @@ async def list_answers(
                 "source_type": doc.source_type if doc else "",
             },
         })
-    return [{
-        "answer_id": a.id, "question": a.question, "refused": a.refused,
-        "refusal_reason": a.refusal_reason, "coverage_note": a.coverage_note,
-        "claims": claims_by_answer.get(a.id, []), "technical_context": [],
-        "created_at": a.created_at.isoformat(),
-    } for a in answers]
+    out = []
+    for a in answers:
+        meta = a.meta or {}
+        rows = claims_by_answer.get(a.id, [])
+        # Older answers predate the envelope. Rebuild the minimum that keeps the
+        # thread readable - E segments from the claims - rather than dropping
+        # them to a blank turn.
+        segments = meta.get("segments") or [
+            {"type": "E", "text": c["text"], "claim_id": c["id"],
+             "basis": "", "doc_ids": []} for c in rows
+        ]
+        out.append({
+            "answer_id": a.id, "question": a.question, "refused": a.refused,
+            "refusal_reason": a.refusal_reason, "coverage_note": a.coverage_note,
+            "claims": rows, "technical_context": [],
+            "segments": segments,
+            "answer_kind": meta.get("answer_kind")
+            or ("refusal" if a.refused else "evidential"),
+            "refusal_kind": meta.get("refusal_kind", ""),
+            "looked_at": meta.get("looked_at", []),
+            "suggestions": meta.get("suggestions", []),
+            "sources": meta.get("sources", []),
+            "resolved_question": meta.get("resolved_question", ""),
+            "created_at": a.created_at.isoformat(),
+        })
+    return out
 
 
 class RefindRequest(BaseModel):
@@ -1134,27 +1248,53 @@ async def clarify_endpoint(
     from app.agents.constraints import query_specificity
     specificity, signals = query_specificity(body.query)
 
+    # DEMO MODE ASKS THE MODEL, IT DOES NOT RECITE. The always-ask fallback was
+    # a deterministic sentence chosen from four branches, so nearly every query
+    # produced the SAME question - which reads as a script, not as a system that
+    # read the request. The model is already being called here; it just needs to
+    # be told that in this mode a question is required. Same call, same cache,
+    # a question about THIS query.
+    always = get_settings().clarify_always_ask and specificity != "specific"
     r = await complete_json(
         "clarify_refine",
         f"Research request: {body.query}\n"
         + (f"A deterministic check already rates this request as SPECIFIC "
            f"({', '.join(signals)}). Do not ask clarifying questions.\n"
            if specificity == "specific" else "")
+        + ("Return EXACTLY ONE clarifying question - the single question whose "
+           "answer would most sharpen THIS request. Name the specific systems, "
+           "settings, outcomes or sub-area the request leaves open, in its own "
+           "vocabulary. Never ask a generic 'can you be more specific'. "
+           "`questions` must NOT be empty.\n" if always else "")
         + "Return: the research domain and academic FIELD; the user's objective; "
         "any CONSTRAINTS in the text (since_year from 'after 2022', "
         "min_citations from 'at least 50 citations', else 0); in_scope = false "
         "when the question is really biomedicine, neuroscience, psychology, "
         "social science, humanities, medicine or law (this platform searches "
         "arXiv + Semantic Scholar for computer-science / engineering researchers "
-        "and covers those fields poorly); and `ambiguity`. Leave `questions` "
-        "EMPTY unless two materially different research projects would satisfy "
-        "the same words — a request that is merely broad is not ambiguous, and "
-        "asking about it wastes the researcher's time. Concise.",
+        "and covers those fields poorly); and `ambiguity`."
+        # The EMPTY rule and the always-ask instruction above are contradictory,
+        # and the EMPTY one wins when both are present - measured. So in
+        # always-ask mode it is dropped rather than argued with.
+        + ("" if always else
+           " Leave `questions` EMPTY unless two materially different research "
+           "projects would satisfy the same words — a request that is merely "
+           "broad is not ambiguous, and asking about it wastes the "
+           "researcher's time.")
+        + " Concise.",
         ClarifyResult,
     )
     # Hard override, not a hint. The model reliably volunteers questions even
     # when told not to; the deterministic verdict is the one that decides.
     questions = [] if specificity == "specific" else list(r.questions)
+    # Demo mode. The question is real and answerable, and leaving it blank
+    # contributes nothing to the query — so the run that follows is identical
+    # to one launched without the pause, caches included.
+    # The floor, not the plan: only reached if the model stayed silent despite
+    # being told a question is required.
+    if always and not questions:
+        from app.agents.constraints import scoping_question
+        questions = [scoping_question(body.query)]
     scope_note = ""
     if not r.in_scope:
         scope_note = (

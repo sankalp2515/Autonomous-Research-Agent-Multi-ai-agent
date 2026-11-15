@@ -6,6 +6,8 @@ explicit honesty about abstract-only results.
 """
 
 import asyncio
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -53,11 +55,52 @@ class BlogHit:
     domain: str = ""
 
 
+# ── Search-response cache (the two search APIs only) ─────────────────────
+#
+# Determinism first, speed second. The same query returning a slightly
+# different result set makes every downstream prompt different, so the
+# screening, extraction and drafting caches all miss — search non-determinism
+# is the reason a repeated run of the same question is slow, and the reason the
+# same question in a new project reads a different corpus. It also removes the
+# Semantic Scholar 429, which does not fail loudly: a rate-limited search
+# contributes ZERO hits and the candidate pool silently loses that source.
+#
+# PDF downloads are deliberately NOT cached here — they are large and already
+# deduped by sha256 in the ingest pipeline, and the library keeps the bytes.
+_SEARCH_HOSTS = {"export.arxiv.org", "api.semanticscholar.org"}
+
+
+def _search_cache_key(url: str, params: dict | None) -> str | None:
+    if (httpx.URL(url).host or "") not in _SEARCH_HOSTS:
+        return None
+    blob = json.dumps({"u": url, "p": params or {}}, sort_keys=True, default=str)
+    return "search:" + hashlib.sha256(blob.encode()).hexdigest()
+
+
 @retry_external
 async def _get(url: str, **kwargs) -> httpx.Response:
+    ttl = int(getattr(get_settings(), "search_cache_ttl_seconds", 0) or 0)
+    key = _search_cache_key(url, kwargs.get("params")) if ttl > 0 else None
+    if key:
+        try:
+            from app.stores.redis_store import get_redis
+            hit = await get_redis().get(key)
+        except Exception:
+            hit = None
+        if hit is not None:
+            # Replayed as a real response object so every caller's parsing path
+            # is byte-for-byte the one it runs live.
+            return httpx.Response(200, text=hit,
+                                  request=httpx.Request("GET", url))
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
         resp = await client.get(url, **kwargs)
     resp.raise_for_status()
+    if key:
+        try:
+            from app.stores.redis_store import get_redis
+            await get_redis().set(key, resp.text, ex=ttl)
+        except Exception:
+            pass  # a cache write must never fail a search
     return resp
 
 

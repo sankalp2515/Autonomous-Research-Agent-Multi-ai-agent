@@ -39,6 +39,15 @@ async def cache_set(key: str, value: str, ttl: int) -> None:
     await get_redis().set(f"llmcache:{key}", value, ex=ttl)
 
 
+async def cache_delete(key: str) -> None:
+    """Evict a POISONED entry — output that was cached before anyone checked it
+    could be parsed. See `complete_json` for why that is worse than no cache."""
+    try:
+        await get_redis().delete(f"llmcache:{key}")
+    except Exception:
+        pass
+
+
 # ── Per-caller rate limit (fixed window) ─────────────────────────────────
 async def rate_limit_ok(key: str, limit: int, window_sec: int = 60) -> bool:
     """Return False when `key` has exceeded `limit` requests in the current

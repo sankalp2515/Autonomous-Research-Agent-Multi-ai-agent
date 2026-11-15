@@ -6,6 +6,8 @@ Encrypted/corrupt files are classified, not crashed on.
 """
 
 import asyncio
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -174,8 +176,64 @@ def _parse_sync(pdf_bytes: bytes) -> ParsedDocument:
                           figures=figures)
 
 
+# ── Parse memo (content-addressed) ───────────────────────────────────────
+#
+# Parsing is deterministic in the PDF bytes and costs ~10-30s per paper on the
+# reference box. The same bytes are re-parsed every time a paper enters a
+# SECOND project — `Document` rows are project-scoped, and the library already
+# returns the identical PDF without re-downloading it, so the parse was the
+# only reason a known paper cost anything at all.
+#
+# Keyed on the sha256 the ingest pipeline already computes for dedup.
+# Best-effort both ways: a Redis outage costs the parse, never the document.
+
+_PARSE_MEMO_TTL = 60 * 60 * 24 * 30
+
+
+def _encode_parsed(doc: "ParsedDocument") -> str:
+    return json.dumps({
+        "pages": [[p.page_number, p.markdown] for p in doc.pages],
+        "page_count": doc.page_count,
+        "failed_pages": doc.failed_pages,
+        "figures": [[f.page_number, f.xref, list(f.bbox), f.width, f.height,
+                     f.caption] for f in doc.figures],
+    })
+
+
+def _decode_parsed(raw: str) -> "ParsedDocument | None":
+    try:
+        d = json.loads(raw)
+        return ParsedDocument(
+            pages=[ParsedPage(page_number=n, markdown=m) for n, m in d["pages"]],
+            page_count=int(d["page_count"]),
+            failed_pages=list(d.get("failed_pages") or []),
+            figures=[ParsedFigure(page_number=f[0], xref=f[1], bbox=tuple(f[2]),
+                                  width=f[3], height=f[4], caption=f[5])
+                     for f in (d.get("figures") or [])],
+        )
+    except Exception:
+        return None      # a malformed entry re-parses; it never breaks ingest
+
+
 async def parse_pdf(pdf_bytes: bytes, *, max_mb: int = 50) -> ParsedDocument:
     if len(pdf_bytes) > max_mb * 1024 * 1024:
         raise IngestError(f"PDF exceeds {max_mb}MB limit",
                           detail={"size_mb": round(len(pdf_bytes) / 1048576, 1)})
-    return await asyncio.to_thread(_parse_sync, pdf_bytes)
+    key = "parsedpdf:" + hashlib.sha256(pdf_bytes).hexdigest()
+    try:
+        from app.stores.redis_store import get_redis
+        hit = await get_redis().get(key)
+    except Exception:
+        hit = None
+    if hit:
+        cached = _decode_parsed(hit)
+        if cached is not None:
+            return cached
+
+    parsed = await asyncio.to_thread(_parse_sync, pdf_bytes)
+    try:
+        from app.stores.redis_store import get_redis
+        await get_redis().set(key, _encode_parsed(parsed), ex=_PARSE_MEMO_TTL)
+    except Exception:
+        pass
+    return parsed

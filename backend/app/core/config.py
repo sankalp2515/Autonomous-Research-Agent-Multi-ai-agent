@@ -104,28 +104,60 @@ class Settings(BaseSettings):
 
     # LLM providers (free tier)
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-3.5-flash-lite"
     # Voice for the report's audio briefing. Uses the same GEMINI_API_KEY; with
     # no key the /tts endpoint reports itself unconfigured and the client falls
     # back to the browser's own speech synthesis rather than failing.
-    gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
+    gemini_tts_model: str = "gemini-3.5-flash-preview-tts"
     gemini_rpm: int = 10
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
     groq_rpm: int = 25
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
     deepseek_rpm: int = 20
     openrouter_api_key: str = ""
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    openrouter_model: str = "nvidia/nemotron-3.5-lightning:free"
     openrouter_rpm: int = 15
     # NVIDIA NIM — OpenAI-compatible. Higher RPM than the free fleet; used as a
     # fast, capable tier for draft/chat/query steps once NVIDIA_API_KEY is set.
     nvidia_api_key: str = ""
     nvidia_model: str = "meta/llama-3.3-70b-instruct"
     nvidia_rpm: int = 40
+    # ── Extra keys per provider (throughput, not redundancy) ─────────────
+    # A free-tier key IS the rate limit: one key at N RPM caps the whole fleet
+    # no matter how much concurrency the pipeline has. Each additional key is
+    # routed as its own lane with its own token bucket, so N keys multiply the
+    # ceiling by N. `<provider>_rpm` is therefore the budget PER KEY, because
+    # that is how the provider meters it.
+    #
+    # These MUST be declared here: `model_config` sets extra="ignore", so
+    # GEMINI_API_KEY_2..4 and GROQ_API_KEY_2..4 sitting in .env with no field
+    # to read them are silently discarded — which is exactly what was happening.
+    gemini_api_key_2: str = ""
+    gemini_api_key_3: str = ""
+    gemini_api_key_4: str = ""
+    openrouter_api_key_2: str = ""
+    openrouter_api_key_3: str = ""
+    openrouter_api_key_4: str = ""
+    groq_api_key_2: str = ""
+    groq_api_key_3: str = ""
+    groq_api_key_4: str = ""
     huggingface_api_key: str = ""
     llm_cache_ttl_seconds: int = 86_400
+    # How long a SEARCH response stays replayable. Buys determinism as much as
+    # speed — see `_search_cache_key` in app/agents/sources.py. 0 disables.
+    search_cache_ttl_seconds: int = 86_400
+    # ALWAYS pause for clarification, even on a request the deterministic check
+    # rates as specific. OFF by default: the point of `query_specificity` is
+    # that a researcher who wrote a precise question should not be interrogated
+    # about it. ON, the pause is guaranteed — it is the most legible moment in
+    # the product and a run that skips it looks like a search box.
+    #
+    # It never changes what is RESEARCHED: an unanswered question folds no
+    # context into the query, so the launched run is byte-identical either way.
+    # That is also what keeps its caches warm.
+    clarify_always_ask: bool = False
 
     # External sources
     tavily_api_key: str = ""

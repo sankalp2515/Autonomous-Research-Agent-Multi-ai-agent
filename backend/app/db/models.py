@@ -197,6 +197,12 @@ class Answer(TimestampMixin, Base):
     # paper), or "selection" (chat-with-selection). History restore shows only
     # "corpus" so scoped/one-off chats don't clutter the main conversation.
     kind: Mapped[str] = mapped_column(String(16), default="corpus")
+    # The conversational envelope: typed segments, refusal kind, sources,
+    # suggestions and the standalone form a follow-up was retrieved with.
+    # Persisted so restoring history restores the ANSWER a user read, not a
+    # reconstruction of it - a refusal that has lost why it refused is worse
+    # than no history at all. JSON, so a new field needs no migration.
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Claim(TimestampMixin, Base):

@@ -23,6 +23,11 @@ from app.agents import nodes
 from app.agents.schemas import DimensionProbe, DimensionProbeResult
 from app.retrieval.dimension import DimensionHits, DimensionSpec
 
+# The extractor addresses passages by CONTENT (`nodes._source_id`), so the same
+# paper yields the same prompt in every project. A probe can only cite an id the
+# prompt showed it, and the cell it produces must carry the REAL chunk id back —
+# that address is what the evidence rail resolves.
+
 CHUNK_TEXT = ("End-to-end response time was measured at 9.03 s for the graph "
               "pipeline against 1.20 s for the vector baseline.")
 NO_LATENCY_TEXT = ("We leave a systematic efficiency analysis to future work "
@@ -119,7 +124,7 @@ async def test_a_recovered_finding_is_verified_and_persisted(patched):
     patched["probe"] = DimensionProbeResult(probes=[DimensionProbe(
         dimension="retrieval latency", status="reported",
         text="The graph pipeline answered in 9.03 s versus 1.20 s for vectors.",
-        metric="s", value="9.03 s", chunk_id="c_lat",
+        metric="s", value="9.03 s", chunk_id=nodes._source_id(CHUNK_TEXT),
         quote="response time was measured at 9.03 s")])
 
     row = _row()
@@ -138,7 +143,7 @@ async def test_a_fabricated_recovery_is_dropped_not_promoted(patched):
     """Recovery must not become a back door around the verification gate."""
     patched["probe"] = DimensionProbeResult(probes=[DimensionProbe(
         dimension="retrieval latency", status="reported",
-        text="Latency was 40 ms.", metric="ms", value="40 ms", chunk_id="c_lat",
+        text="Latency was 40 ms.", metric="ms", value="40 ms", chunk_id=nodes._source_id(CHUNK_TEXT),
         quote="latency was a blazing 40 ms in all conditions")])
 
     row = _row()
@@ -191,19 +196,21 @@ async def test_an_explicit_statement_of_absence_is_quote_checked(patched):
     patched["chunks"] = [_Chunk("c_none", NO_LATENCY_TEXT, section="Conclusion")]
     patched["probe"] = DimensionProbeResult(probes=[DimensionProbe(
         dimension="retrieval latency", status="not_reported",
-        chunk_id="c_none", quote="leave a systematic efficiency analysis to future work",
+        chunk_id=nodes._source_id(NO_LATENCY_TEXT), quote="leave a systematic efficiency analysis to future work",
         rationale="explicitly deferred")])
 
     verdicts = await nodes._recover_one_study(_state(), _row(), [LATENCY], "objective")
     cell = verdicts["retrieval latency"]
-    assert cell["state"] == "not_reported" and cell["chunk_id"] == "c_none"
+    assert cell["state"] == "not_reported"
+    # translated back to the row this project owns, not the content id
+    assert cell["chunk_id"] == "c_none"
 
 
 async def test_an_invented_absence_quote_is_not_attached(patched):
     patched["chunks"] = [_Chunk("c_none", NO_LATENCY_TEXT, section="Conclusion")]
     patched["probe"] = DimensionProbeResult(probes=[DimensionProbe(
         dimension="retrieval latency", status="not_reported",
-        chunk_id="c_none", quote="we deliberately omitted all timing experiments",
+        chunk_id=nodes._source_id(NO_LATENCY_TEXT), quote="we deliberately omitted all timing experiments",
         rationale="explicitly deferred")])
 
     cell = (await nodes._recover_one_study(

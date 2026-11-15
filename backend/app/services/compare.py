@@ -15,13 +15,44 @@ Two ways to get dimensions:
 Recommendations (`recommend_related`) use the corpus similarity we already
 compute for the map — no extra API calls — to suggest which OTHER papers in the
 project belong in the comparison, leaving the final choice to the researcher.
+
+TWO THINGS THIS MODULE GOT WRONG, AND THEY COMPOUNDED
+=====================================================
+
+**The addressing bug.** `_format_sources` names each passage by `_source_id` —
+a hash of its CONTENT, so the prompt for a given paper is byte-identical in
+every project and the LLM cache can hit. This module built its gate lookup keyed
+by the ROW id instead:
+
+    chunk_lookup = {c.chunk_id: c.text for c in chunks}
+
+So the model cited the id it was shown, the gate looked it up under a different
+scheme, missed, and failed every cell at layer 1 as `missing_chunk`. Not some
+cells — EVERY cell, in every comparison. The same bug shipped in
+`app/services/grounded.py`; the pipeline avoids it with `_source_index`, which
+is now used here too, and the id is translated back to a real `Chunk.id` before
+anything is persisted.
+
+**And the UI could not tell you.** A failed cell returned `None`, and `None`
+rendered as "— not addressed" — a claim about the PAPER. So a total, systemic
+failure of ours displayed as "none of these five papers addresses any of these
+four dimensions", stated with confidence, and looked like a finding. This is
+exactly the error the evidence matrix's four cell states exist to prevent
+(`not_reported` vs `extraction_uncertain`): absence of evidence is not evidence
+of absence, and our own limitation must never be published as a fact about the
+literature.
+
+So an empty cell now carries WHY it is empty, and only ONE of the four reasons
+is about the paper. Had this existed, the bug would have rendered as twenty
+cells saying "we could not establish this" — which is a bug report, not a
+finding.
 """
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.nodes import _format_sources
+from app.agents.nodes import _format_sources, _source_index
 from app.agents.schemas import DraftClaim
 from app.core.logging import get_logger
 from app.db.models import Chunk, Claim, ClaimEvidence, Comparison, Document
@@ -33,6 +64,21 @@ logger = get_logger("compare")
 
 MAX_DOCS = 5
 MAX_DIMENSIONS = 6
+
+# Why a cell is empty. Exactly one of these is a statement about the PAPER;
+# the rest are statements about VERISCOPE, and collapsing them into one
+# em-dash is how a systemic failure of ours came to read as a finding.
+CELL_REPORTED = "reported"              # a gate-verified finding
+CELL_NOT_ADDRESSED = "not_addressed"    # the model read the passages and found nothing — the paper
+CELL_NO_PASSAGES = "no_passages"        # retrieval reached nothing for this axis — ours
+CELL_UNVERIFIED = "unverified"          # a claim was drafted and the gate rejected it — ours
+CELL_FAILED = "failed"                  # the cell errored — ours
+
+
+def _empty(state: str, reason: str = "") -> dict:
+    """An empty cell that says whose limitation it is."""
+    return {"verified": False, "state": state, "reason": reason,
+            "claim": "", "quote": "", "chunk_id": "", "claim_id": "", "page": 0}
 
 
 class ComparisonDimensions(BaseModel):
@@ -106,14 +152,20 @@ _CELL_SYSTEM = (
 
 
 async def _draft_cell(session: AsyncSession, project_id: str, document_id: str,
-                      dimension: str) -> dict | None:
-    """Draft + verify one matrix cell. Returns a cell dict or None (honest gap)."""
+                      dimension: str) -> dict:
+    """Draft + verify one matrix cell.
+
+    Always returns a cell. A cell that carries no finding says WHY, because the
+    four reasons are not the same fact and only one of them is about the paper.
+    """
     chunks = await retrieve(
         session, project_id, dimension, document_ids=[document_id],
         top_k=6, use_rerank=True,
     )
     if not chunks:
-        return None
+        return _empty(CELL_NO_PASSAGES,
+                      "retrieval returned no passages from this document for "
+                      "this dimension")
     result = await complete_json(
         "draft",
         f"Aspect to report on: {dimension}\n\nSOURCES:\n"
@@ -121,18 +173,32 @@ async def _draft_cell(session: AsyncSession, project_id: str, document_id: str,
         CellDraft, system=_CELL_SYSTEM,
     )
     if not result.claim:
-        return None
-    chunk_lookup = {c.chunk_id: c.text for c in chunks}
-    chunk_meta = {c.chunk_id: c for c in chunks}
+        # The one verdict that IS about the paper: the passages were read and
+        # they do not speak to this dimension.
+        return _empty(CELL_NOT_ADDRESSED)
+
+    # ADDRESSING. The prompt above names each passage by CONTENT hash, so the
+    # gate must be keyed the same way and the id translated back to a row this
+    # project owns before anything is persisted. Keying by `chunk_id` failed
+    # every cell at layer 1 as `missing_chunk`.
+    chunk_lookup, real_chunk = _source_index(chunks)
+    meta_by_real = {c.chunk_id: c for c in chunks}
     gate = await verify_claims(
         [ClaimInput(result.claim.text, result.claim.chunk_id, result.claim.quote)],
         chunk_lookup,
     )
     r = gate.results[0]
     if not r.verified:
-        return None
+        return _empty(CELL_UNVERIFIED,
+                      f"a claim was drafted and the gate rejected it ({r.reason})")
     ev = r.evidence
-    meta = chunk_meta.get(ev.chunk_id)
+    # The gate may have re-attributed the citation to the passage that actually
+    # contains the quote; translate whichever id came back.
+    chunk_id = real_chunk.get(ev.chunk_id, ev.chunk_id)
+    meta = meta_by_real.get(chunk_id)
+    if meta is None:  # unreachable in practice; never persist a dangling row
+        return _empty(CELL_UNVERIFIED,
+                      "the verified citation did not resolve to a corpus row")
     # Persist the verified claim so cells are click-to-source and can be saved
     # to the notebook / referenced exactly like pipeline claims.
     claim_row = Claim(project_id=project_id, text=result.claim.text,
@@ -140,7 +206,7 @@ async def _draft_cell(session: AsyncSession, project_id: str, document_id: str,
     session.add(claim_row)
     await session.flush()
     session.add(ClaimEvidence(
-        claim_id=claim_row.id, chunk_id=ev.chunk_id, quote=ev.quote,
+        claim_id=claim_row.id, chunk_id=chunk_id, quote=ev.quote,
         quote_match_ok=True, quote_char_start=ev.quote_match.char_start,
         quote_char_end=ev.quote_match.char_end,
         nli_label=ev.nli_label, nli_score=ev.nli_score,
@@ -148,10 +214,12 @@ async def _draft_cell(session: AsyncSession, project_id: str, document_id: str,
     return {
         "claim": result.claim.text,
         "quote": ev.quote,
-        "chunk_id": ev.chunk_id,
+        "chunk_id": chunk_id,
         "claim_id": claim_row.id,
-        "page": meta.page_start if meta else 0,
+        "page": meta.page_start,
         "verified": True,
+        "state": CELL_REPORTED,
+        "reason": "",
     }
 
 
@@ -173,14 +241,15 @@ async def compare_documents(session: AsyncSession, project_id: str,
 
     matrix: list[dict] = []
     for dim in dimensions:
-        cells: dict[str, dict | None] = {}
+        cells: dict[str, dict] = {}
         for doc_id in ordered_ids:
             try:
                 cells[doc_id] = await _draft_cell(session, project_id, doc_id, dim)
             except Exception:
                 logger.exception("cell draft failed",
                                  extra={"doc": doc_id, "dimension": dim[:40]})
-                cells[doc_id] = None
+                cells[doc_id] = _empty(CELL_FAILED, "this cell errored while "
+                                                    "being built")
         matrix.append({"dimension": dim, "cells": cells})
 
     if not title:
@@ -193,10 +262,17 @@ async def compare_documents(session: AsyncSession, project_id: str,
     )
     session.add(comp)
     await session.flush()
+    states: dict[str, int] = {}
+    for row in matrix:
+        for c in row["cells"].values():
+            states[c.get("state", CELL_FAILED)] = states.get(c.get("state", CELL_FAILED), 0) + 1
     logger.info("comparison built", extra={
         "project_id": project_id, "docs": len(ordered_ids),
         "dimensions": len(dimensions),
-        "cells_filled": sum(1 for row in matrix for c in row["cells"].values() if c)})
+        "cells_filled": states.get(CELL_REPORTED, 0),
+        # A comparison where every cell is empty for the SAME reason is a bug
+        # report, not a finding. Logged so it is visible without a screenshot.
+        "cell_states": states})
     return comp
 
 

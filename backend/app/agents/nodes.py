@@ -9,6 +9,7 @@ silent degradation.
 """
 
 import asyncio
+import hashlib
 import re
 import time
 
@@ -338,6 +339,20 @@ async def clarify_node(state: PipelineState) -> PipelineState:
 @_timed("plan")
 async def plan_node(state: PipelineState) -> PipelineState:
     clar = state.get("clarification", {})
+
+    # A CURATED RUN NEVER SEARCHES. When the researcher screened candidates and
+    # approved exactly these papers, `research` takes the `selected_papers`
+    # branch and the query expansion below is generated, paid for, and thrown
+    # away. It is also the one prompt on this path that embeds the project's
+    # research MEMORY, which grows with every run - so it is the only call that
+    # cannot be reused between two projects asking the identical question.
+    # Skipping it removes an LLM call and a source of variance together.
+    if state.get("selected_papers"):
+        state["plan"] = {"queries": {"arxiv": [], "semantic_scholar": [],
+                                     "github": [], "blogs": []},
+                         "rationale": "curated run - the approved papers are the "
+                                      "corpus, so no search queries are needed"}
+        return state
     targets = state.get("replan_targets") or clar.get("sub_questions", [])
 
     # Cross-session memory: recall what this project already researched so the
@@ -778,6 +793,25 @@ async def research_node(state: PipelineState) -> PipelineState:
         if selected:
             # Human-in-the-loop: the researcher already screened candidates and
             # approved exactly these — ingest them, skip search + auto-screen.
+            # THE HUMAN SCREEN IS STILL A SCREEN, and the funnel has to say so.
+            #
+            # This branch skips search and `_screen_papers`, which are the only
+            # places `funnel.found` and `funnel.screened` were ever recorded —
+            # so a curated run published a ladder starting `discovered: 0,
+            # screened: 0`, and the report's Flow diagram rendered nothing at
+            # all. That is the funnel under-claiming: the candidates WERE
+            # discovered and they WERE screened, against the criteria printed
+            # directly beneath the empty diagram. A researcher did it instead
+            # of a model, which is a stronger provenance claim, not a weaker
+            # one — so it is recorded, and labelled as human.
+            state["funnel"] = {
+                **state.get("funnel", {}),
+                "found": len(selected),
+                "screened": len(selected),
+                "screened_in": len(selected),
+                "screened_out": 0,
+                "screened_by": "researcher",
+            }
             unique = [sources.PaperHit(
                 source=d.get("source", "screen"), external_id=d.get("external_id", ""),
                 title=d.get("title", ""), abstract=d.get("abstract", ""),
@@ -1186,6 +1220,16 @@ async def _read_paper_for_extraction(state: PipelineState, doc_id: str,
     return chunks, {}
 
 
+def _schema_label_pool(state: PipelineState) -> list[str]:
+    """The dimension labels offered to the extractor: required axes first, then
+    optional ones, both in the schema's own order. Deterministic for a given
+    question, which is what makes a paper's extraction prompt reusable."""
+    required = [d.name for d in _schema_dimensions(state, required_only=True)]
+    optional = [d.name for d in _schema_dimensions(state)
+                if d.name not in required]
+    return (required + optional)[:14]
+
+
 async def _extract_one_study(state: PipelineState, doc_id: str, title: str,
                              year, objective: str,
                              dimensions: list[str]) -> dict | None:
@@ -1196,7 +1240,10 @@ async def _extract_one_study(state: PipelineState, doc_id: str, title: str,
     if not chunks:
         return None
 
-    chunk_lookup = {c.chunk_id: c.text for c in chunks}
+    # Keyed by CONTENT (see `_source_id`), which is what the prompt now names,
+    # so the gate verifies against the same identity the model was given and
+    # the prompt is identical in every project that holds this paper.
+    chunk_lookup, real_chunk = _source_index(chunks)
     # Grouped by axis when dimension-directed retrieval supplied the grouping;
     # a flat block otherwise (legacy path).
     sources_block = _format_sources_by_dimension(chunks, coverage, objective)
@@ -1254,8 +1301,10 @@ async def _extract_one_study(state: PipelineState, doc_id: str, title: str,
             session.add(row)
             await session.flush()
             session.add(ClaimEvidence(
-                claim_id=row.id, chunk_id=ev.chunk_id, quote=ev.quote,
-                quote_match_ok=True,
+                # Back to a row THIS project owns: the model cited content, the
+                # evidence rail needs a chunk.
+                claim_id=row.id, chunk_id=real_chunk.get(ev.chunk_id, ev.chunk_id),
+                quote=ev.quote, quote_match_ok=True,
                 quote_char_start=ev.quote_match.char_start,
                 quote_char_end=ev.quote_match.char_end,
                 nli_label=ev.nli_label, nli_score=ev.nli_score,
@@ -1266,7 +1315,9 @@ async def _extract_one_study(state: PipelineState, doc_id: str, title: str,
                 "text": finding.text,
                 "metric": finding.metric[:40],
                 "value": finding.value[:40],
-                "chunk_id": finding.chunk_id,
+                # The rail resolves this against a Chunk row, so it is the real
+                # id — the content id is only ever the model's addressing.
+                "chunk_id": real_chunk.get(finding.chunk_id, finding.chunk_id),
                 "quote": finding.quote,
                 "nli_label": ev.nli_label,
                 "nli_score": round(ev.nli_score, 3),
@@ -1541,7 +1592,7 @@ async def _recover_one_study(state: PipelineState, row: dict, required: list,
     if not chunks:
         return _fallback("no passages could be retrieved for this axis")
 
-    chunk_lookup = {c.chunk_id: c.text for c in chunks}
+    chunk_lookup, real_chunk = _source_index(chunks)
     listing = "\n".join(
         "- " + d.name + (" (" + d.description + ")" if d.description else "")
         for d in unresolved)
@@ -1602,7 +1653,8 @@ async def _recover_one_study(state: PipelineState, row: dict, required: list,
                             probe.quote, src,
                             fuzzy_threshold=settings.quote_fuzzy_threshold)
                         if qm.ok:
-                            cell["chunk_id"] = probe.chunk_id
+                            cell["chunk_id"] = real_chunk.get(
+                                probe.chunk_id, probe.chunk_id)
                             cell["quote"] = probe.quote
                 verdicts[name] = cell
             else:
@@ -1651,8 +1703,9 @@ async def _recover_one_study(state: PipelineState, row: dict, required: list,
                 session.add(claim)
                 await session.flush()
                 session.add(ClaimEvidence(
-                    claim_id=claim.id, chunk_id=ev.chunk_id, quote=ev.quote,
-                    quote_match_ok=True,
+                    claim_id=claim.id,
+                    chunk_id=real_chunk.get(ev.chunk_id, ev.chunk_id),
+                    quote=ev.quote, quote_match_ok=True,
                     quote_char_start=ev.quote_match.char_start,
                     quote_char_end=ev.quote_match.char_end,
                     nli_label=ev.nli_label, nli_score=ev.nli_score,
@@ -1661,7 +1714,8 @@ async def _recover_one_study(state: PipelineState, row: dict, required: list,
                     "claim_id": claim.id, "dimension": name,
                     "text": probe.text, "metric": (probe.metric or "")[:40],
                     "value": (probe.value or "")[:40],
-                    "chunk_id": probe.chunk_id, "quote": probe.quote,
+                    "chunk_id": real_chunk.get(probe.chunk_id, probe.chunk_id),
+                    "quote": probe.quote,
                     "nli_label": ev.nli_label, "nli_score": round(ev.nli_score, 3),
                     # Same qualifiers as a first-pass finding — a recovered
                     # number that arrives context-free is invisible to the
@@ -1901,7 +1955,26 @@ async def extract_evidence_node(state: PipelineState) -> PipelineState:
             break
         batch = doc_ids[i:i + wave]
         results = await asyncio.gather(*[
-            _extract_one_study(state, d, meta[d][0], meta[d][1], objective, dims[:14])
+            # THE LABEL POOL IS THE SCHEMA'S, NOT THE RUN'S RUNNING TALLY.
+            #
+            # This used to pass `dims[:14]` — the labels discovered by papers
+            # that had already finished. That made a paper's extraction prompt
+            # depend on which OTHER papers finished before it, which is decided
+            # by a concurrent worker pool: the same paper produced a different
+            # prompt on every run, and a different one again when the corpus
+            # was a 12-paper subset instead of 28. Measured on a re-run of an
+            # already-extracted corpus, 9 of 12 papers missed the LLM cache for
+            # this reason alone — and each miss cascades, because new findings
+            # mean new gate pairs, a different matrix, and a different
+            # architect prompt after it.
+            #
+            # The evidence schema's axes are the right pool anyway: they are
+            # derived from the QUESTION at temperature 0, they are exactly what
+            # the matrix is audited against, and `_canonicalize_dimensions`
+            # still merges whatever drift a paper invents. Same paper, same
+            # question, same prompt — in any run, in any project.
+            _extract_one_study(state, d, meta[d][0], meta[d][1], objective,
+                               _schema_label_pool(state))
             for d in batch
         ], return_exceptions=True)
         reraise_if_cancelled(results)
@@ -2231,8 +2304,21 @@ async def report_architect_node(state: PipelineState) -> PipelineState:
             dim_counts[d] = dim_counts.get(d, 0) + 1
         for fw in row.get("frameworks", []):
             frameworks[fw] = frameworks.get(fw, 0) + 1
-    top_dims = sorted(dim_counts.items(), key=lambda kv: -kv[1])[:14]
-    top_fw = sorted(frameworks.items(), key=lambda kv: -kv[1])[:14]
+    # STABLE ORDER, NOT JUST STABLE COUNTS. `matrix` is appended to by a
+    # concurrent worker pool, so its row order is the order papers finished
+    # extracting - which varies between two runs of the identical question.
+    # Sorting on count alone left ties in that arrival order, so the architect's
+    # prompt differed run to run.
+    #
+    # That is the most expensive prompt in the pipeline to destabilise: the
+    # architect's sections carry the retrieval BRIEF for drafting, so a prompt
+    # that misses its cache can return a slightly different structure, and then
+    # every drafting prompt downstream differs too. One unstable join at the top
+    # costs the entire back half. The name is the tie-break, and it also gives
+    # the architect the reproducibility it is supposed to have - same question
+    # in, same structure out.
+    top_dims = sorted(dim_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:14]
+    top_fw = sorted(frameworks.items(), key=lambda kv: (-kv[1], kv[0]))[:14]
 
     evidence_brief = ""
     if matrix:
@@ -2244,7 +2330,9 @@ async def report_architect_node(state: PipelineState) -> PipelineState:
             "- systems/methods evaluated: "
             + ", ".join(f + " (" + str(n) + ")" for f, n in top_fw) + "\n"
             "- sample of studies: "
-            + "; ".join((r["title"] or "")[:70] for r in matrix[:8]) + "\n"
+            # Sorted for the same reason as the counts above: `matrix[:8]` in
+            # arrival order is a different eight studies on a re-run.
+            + "; ".join(sorted((r["title"] or "")[:70] for r in matrix)[:8]) + "\n"
             "Dimensions reported by MANY studies deserve their own section or "
             "table; a dimension only one study touched does not."
         )
@@ -2497,6 +2585,46 @@ def _norm_claim(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", text.lower())).strip()
 
 
+def _source_id(text: str) -> str:
+    """A passage's identity, derived from its CONTENT rather than its row.
+
+    THE PROBLEM THIS SOLVES. `chunk_id` is a per-project primary key, and it
+    was printed into every extraction and drafting prompt (the model has to
+    name the passage it is quoting). So the same paper, read in a second
+    project, produced a prompt that differed from the first in exactly the
+    UUIDs — and every LLM cache entry missed. Re-running a question against an
+    already-read corpus cost full price, and a completed run could not be
+    reused anywhere but the project that produced it.
+
+    A passage's identity is its text. Two chunks with the same bytes ARE the
+    same evidence, in any project, so they get the same id and the prompt for
+    a given paper is now byte-identical wherever it is read.
+
+    This is an addressing change, not a grounding change: the id is translated
+    back to the real `Chunk.id` before anything is persisted, so every
+    `ClaimEvidence` row still points at a real row in THIS project, and the
+    gate still matches quotes against the real chunk text.
+    """
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _source_index(chunks) -> tuple[dict[str, str], dict[str, str]]:
+    """(text keyed by source id, real chunk id keyed by source id).
+
+    The first is what the gate verifies against; the second is what turns a
+    model's citation back into a row this project owns. Identical passages
+    collapse to one id, which is correct — they are one piece of evidence —
+    and the first chunk carrying that text is the one credited.
+    """
+    lookup: dict[str, str] = {}
+    real: dict[str, str] = {}
+    for c in chunks:
+        sid = _source_id(c.text)
+        lookup[sid] = c.text
+        real.setdefault(sid, c.chunk_id)
+    return lookup, real
+
+
 def _format_sources(chunks, query: str = "") -> str:
     """Build the fenced SOURCE blocks.
 
@@ -2515,7 +2643,7 @@ def _format_sources(chunks, query: str = "") -> str:
         if not body:
             continue  # fully redundant with earlier context — drop, don't pad
         parts.append(
-            f"<SOURCE chunk_id=\"{c.chunk_id}\" doc=\"{c.document_title[:90]}\""
+            f"<SOURCE chunk_id=\"{_source_id(c.text)}\" doc=\"{c.document_title[:90]}\""
             f" section=\"{c.section[:60]}\" pages=\"{c.page_start}-{c.page_end}\"{label}>\n"
             f"{_sanitize_chunk(body)}\n</SOURCE>"
         )
@@ -2705,8 +2833,10 @@ async def _draft_one_section(state: PipelineState, section: dict) -> None:
         return
 
     # NOTE: chunk_lookup holds the FULL text — the gate verifies quotes against
-    # the original chunk, not the compressed view shown to the model.
-    chunk_lookup = {c.chunk_id: c.text for c in chunks}
+    # the original chunk, not the compressed view shown to the model. Keyed by
+    # CONTENT (`_source_id`), which is what the prompt names, so a section
+    # drafted from the same passages is the same prompt in any project.
+    chunk_lookup, real_chunk = _source_index(chunks)
     sources_block = _format_sources(chunks, section["sub_question"])
 
     # Overlap control. Sections are drafted CONCURRENTLY, so a section cannot be
@@ -2819,8 +2949,9 @@ async def _draft_one_section(state: PipelineState, section: dict) -> None:
                     await session.flush()
                     ev = result.evidence
                     session.add(ClaimEvidence(
-                        claim_id=row.id, chunk_id=ev.chunk_id, quote=ev.quote,
-                        quote_match_ok=True,
+                        claim_id=row.id,
+                        chunk_id=real_chunk.get(ev.chunk_id, ev.chunk_id),
+                        quote=ev.quote, quote_match_ok=True,
                         quote_char_start=ev.quote_match.char_start,
                         quote_char_end=ev.quote_match.char_end,
                         nli_label=ev.nli_label, nli_score=ev.nli_score,
@@ -3318,6 +3449,10 @@ async def assemble_node(state: PipelineState) -> PipelineState:
                     1 for r in _matrix if r.get("findings")),
                 "cited_in_report": len(doc_ids),
             },
+            # Who applied the screen. A curated run's candidates were screened
+            # by the RESEARCHER against the same published criteria, which the
+            # diagram should say rather than imply a model did it.
+            "screened_by": _f.get("screened_by", "screen"),
             # Why every paper that left the funnel left it.
             "excluded_by_reason": dict(_ex),
             "exclusions": state.get("exclusions", [])[:120],

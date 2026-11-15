@@ -240,6 +240,24 @@ class ChatAnswer(BaseModel):
     refusal_reason: str = ""
 
 
+class StandaloneQuestion(BaseModel):
+    """A follow-up turn resolved against the conversation into a question that
+    can be retrieved on its own.
+
+    A retriever handed "why?" searches the corpus for the word "why". This is
+    the standard conversational-RAG rewrite step, and it steers RETRIEVAL only
+    - the rewritten text is never shown, never quoted and never becomes
+    evidence, so a bad rewrite costs recall and can never cost correctness.
+    """
+    question: str = Field(
+        default="",
+        description="the user's latest turn restated as a self-contained "
+                    "question, with pronouns and ellipsis resolved from the "
+                    "conversation. Copy the turn verbatim if it already stands "
+                    "alone.",
+    )
+
+
 # ── Adaptive presentation (Elicit-style) ─────────────────────────────────
 # A section's verified claims can be reorganized into a comparison table when
 # they compare several entities along shared attributes. This is a pure

@@ -31,6 +31,12 @@ class _Chunk:
 CHUNK_TEXT = ("GraphRAG improves multi-hop accuracy to 89% versus 63% for "
               "vector approaches, at the cost of higher latency.")
 
+# What the model is SHOWN and therefore what it can cite. `_source_id` derives a
+# passage's id from its content so the same paper produces the same prompt in
+# every project (see the function's docstring); a hardcoded row id here would be
+# testing an addressing scheme the extractor no longer uses.
+SOURCE_ID = nodes._source_id(CHUNK_TEXT)
+
 
 class _FakeSession:
     """Captures rows the node persists; assigns ids like a real flush would."""
@@ -79,12 +85,12 @@ async def test_unverified_findings_never_enter_the_matrix(patched, monkeypatch):
                 # Real: quote is verbatim from CHUNK_TEXT.
                 StudyFinding(dimension="multi-hop accuracy",
                              text="GraphRAG reaches 89% multi-hop accuracy.",
-                             metric="accuracy", value="89%", chunk_id="c1",
+                             metric="accuracy", value="89%", chunk_id=SOURCE_ID,
                              quote="improves multi-hop accuracy to 89%"),
                 # Fabricated: this sentence appears nowhere in the chunk.
                 StudyFinding(dimension="token cost",
                              text="GraphRAG halves token cost.",
-                             metric="tokens", value="-50%", chunk_id="c1",
+                             metric="tokens", value="-50%", chunk_id=SOURCE_ID,
                              quote="GraphRAG halves token cost on every benchmark"),
             ],
         )
@@ -110,7 +116,7 @@ async def test_every_matrix_finding_is_backed_by_a_persisted_claim(patched, monk
             findings=[StudyFinding(
                 dimension="multi-hop accuracy",
                 text="GraphRAG reaches 89% multi-hop accuracy.",
-                metric="accuracy", value="89%", chunk_id="c1",
+                metric="accuracy", value="89%", chunk_id=SOURCE_ID,
                 quote="improves multi-hop accuracy to 89%")],
         )
 
