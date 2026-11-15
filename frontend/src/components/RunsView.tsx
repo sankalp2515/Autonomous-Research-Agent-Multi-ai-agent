@@ -31,6 +31,12 @@ export default function RunsView({
     gaps: { q: string; note: string }[]; reportId: string;
   } | null>(null);
   const [clarifyQs, setClarifyQs] = useState<string[] | null>(null);
+  // What the clarification pause is a gateway TO. "Screen sources first" went
+  // straight from the textarea to the candidate table, so the researcher
+  // approved a corpus searched from the RAW question — before the pause that
+  // would have sharpened it. Clarify now precedes both destinations; only the
+  // final step differs.
+  const [clarifyThen, setClarifyThen] = useState<"launch" | "screen">("launch");
   const [clarifyAns, setClarifyAns] = useState<string[]>([]);
   const [clarifying, setClarifying] = useState(false);
   const [rejected, setRejected] = useState("");
@@ -195,11 +201,21 @@ export default function RunsView({
     }
   }
 
-  function openScreening() {
-    if (query.trim().length < 8) return;
-    // /screen re-parses year/citation constraints from the query itself; we pass
-    // the UI time-window floor. Constraints are shown + enforced in the table.
-    setScreening({ query: query.trim(), sinceYear: launchOpts.sinceYear || 0, untilYear: 0, minCitations: 0 });
+  /** Open the screening table for `text` — the CLARIFIED question, i.e. the raw
+   *  one plus whatever was answered in the pause. `meta` is passed in rather
+   *  than read from `clarifyMeta` state, which is still the previous value in
+   *  the tick that sets it. */
+  function openScreening(text: string,
+                         meta?: { since_year?: number; until_year?: number; min_citations?: number }) {
+    if (text.trim().length < 8) return;
+    // /screen re-parses year/citation constraints from the query itself; the UI
+    // floor and anything clarify already parsed are the tighter bound.
+    setScreening({
+      query: text.trim(),
+      sinceYear: Math.max(launchOpts.sinceYear || 0, meta?.since_year || 0),
+      untilYear: meta?.until_year || 0,
+      minCitations: meta?.min_citations || 0,
+    });
   }
 
   async function launchWithSelected(sel: Candidate[]) {
@@ -223,20 +239,26 @@ export default function RunsView({
     }
   }
 
-  async function launchRefined() {
+  async function continueRefined() {
     const extras = (clarifyQs ?? [])
       .map((q, i) => (clarifyAns[i]?.trim() ? `- ${q} → ${clarifyAns[i].trim()}` : ""))
       .filter(Boolean);
     const augmented = extras.length ? `${query.trim()}\n\nAdditional context:\n${extras.join("\n")}` : query.trim();
     setClarifyQs(null);
-    await startWith(augmented);
+    // The answers belong to the SCREEN too: they are what makes the search
+    // queries specific, and screening a raw question then running a clarified
+    // one approves a corpus for a different question than the report answers.
+    if (clarifyThen === "screen") openScreening(augmented, clarifyMeta ?? undefined);
+    else await startWith(augmented);
   }
 
   // Every run first passes through clarify: rejects off-topic asks and surfaces
   // clarifying questions. Shared by form submit and the home-composer hand-off.
-  async function runClarify(text: string, opts = launchOpts) {
+  async function runClarify(text: string, opts = launchOpts,
+                            then: "launch" | "screen" = "launch") {
     if (text.trim().length < 8 || clarifying || busy) return;
     setClarifying(true);
+    setClarifyThen(then);
     setError(""); setRejected(""); setClarifyQs(null);
     try {
       const r = await api.clarify(projectId, text.trim());
@@ -254,7 +276,8 @@ export default function RunsView({
         setClarifyAns(r.questions.map(() => ""));
         return;
       }
-      await startWith(text.trim(), opts);
+      if (then === "screen") openScreening(text.trim(), r);
+      else await startWith(text.trim(), opts);
     } catch (err: any) {
       setError(String(err.message ?? err));
     } finally {
@@ -264,7 +287,12 @@ export default function RunsView({
 
   async function start(e: FormEvent) {
     e.preventDefault();
-    if (mode === "screen") { openScreening(); return; }
+    // Screening is the LAST step before ingest, not the first step overall:
+    // clarify -> plan -> evidence plan -> this table -> search & read.
+    if (mode === "screen") {
+      await runClarify(query, { scope: "all", sinceYear: launchOpts.sinceYear }, "screen");
+      return;
+    }
     await runClarify(query, { scope: mode, sinceYear: launchOpts.sinceYear });
   }
 
@@ -427,8 +455,10 @@ export default function RunsView({
               ))}
               <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
                 <button type="button" className="btn btn-ghost" onClick={() => setClarifyQs(null)}>Cancel</button>
-                <button type="button" className="btn btn-accent" onClick={launchRefined} disabled={busy}>
-                  {busy ? <Spinner /> : <>Launch with context <Icon.arrowRight size={14} /></>}
+                <button type="button" className="btn btn-accent" onClick={continueRefined} disabled={busy}>
+                  {busy ? <Spinner />
+                        : <>{clarifyThen === "screen" ? "Screen sources with context" : "Launch with context"}
+                           <Icon.arrowRight size={14} /></>}
                 </button>
               </div>
             </div>

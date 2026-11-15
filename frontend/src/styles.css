@@ -877,7 +877,7 @@ p { margin: 0; }
 .run-row.complete .run-foot { margin-top: 7px; }
 
 /* Resume banner (welcome back) */
-.resume-banner { margin-bottom: 24px; padding: 18px 20px; border-radius: var(--r-lg); background: var(--accent-tint); border: 1px solid var(--accent-soft); position: relative; }
+.resume-banner { display:none; margin-bottom: 24px; padding: 18px 20px; border-radius: var(--r-lg); background: var(--accent-tint); border: 1px solid var(--accent-soft); position: relative; }
 .resume-x { position: absolute; top: 12px; right: 12px; background: none; border: none; color: var(--ink-3); font-size: 16px; }
 .resume-x:hover { color: var(--ink); }
 .resume-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
@@ -1078,9 +1078,114 @@ p { margin: 0; }
 .starter-chip { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-pill); padding: 7px 14px; font-size: 12.5px; color: var(--ink-2); }
 .starter-chip:hover { border-color: var(--accent-2); color: var(--ink); }
 
+/* ── The answer: flowing prose, not a stack of cards ────────────────────────
+   An Ask answer is written to be READ IN SEQUENCE — the drafter is told to lead
+   with the direct answer, then detail, then conditions. Rendering each verified
+   claim as its own card threw that ordering away and made an answer look like
+   search results. So the sentences run together as prose, in the report's own
+   serif, and each declares its TYPE (G6):
+     E  evidential  — quote-verified, carries a clickable footnote
+     D  derived     — computed from counts; NEVER footnoted, because a citation
+                      to one paper misrepresents a sentence derived from many
+     S  structural  — asserts nothing, so it is set quieter
+   ------------------------------------------------------------------------- */
+.ans { animation: fade-rise var(--dur) var(--ease); }
+.ans-prose { font-family: var(--serif); font-size: 16px; line-height: 1.72; color: var(--ink); }
+.ans-s { }
+.ans-e { }
+.ans-d {
+  border-bottom: 1px dotted var(--ink-faint);
+  cursor: help;   /* the basis it was computed from lives in the title */
+}
+.ans-struct { color: var(--ink-2); }
+.ans-rowset {
+  font: 500 9.5px/1 var(--mono); color: var(--ink-3); background: var(--surface-2);
+  border-radius: var(--r-pill); padding: 2px 6px; margin-left: 5px; vertical-align: 1.5px;
+}
+.ans-prose .rp-cite { cursor: pointer; color: var(--accent); }
+
+.ans-resolved {
+  display: inline-flex; align-items: center; gap: 5px; margin-bottom: 10px;
+  font: 500 11px/1.4 var(--mono); color: var(--ink-3);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-pill); padding: 4px 10px;
+}
+
+.ans-foot {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+/* The COMPOSITION, never a "verified against sources" badge — that badge
+   overclaims the moment a derived sentence ships. */
+.ans-comp { font: 600 10.5px/1 var(--mono); letter-spacing: 0.04em; color: var(--ok); }
+.ans-srcs { display: flex; flex-wrap: wrap; gap: 6px; }
+.ans-src {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 500 10.5px/1.3 var(--mono); color: var(--ink-3);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-pill); padding: 3px 9px;
+}
+.ans-src b { color: var(--accent); font-weight: 600; }
+.ans-src em { color: var(--warn); font-style: normal; }
+.ans-acts { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.ans-act { font: 500 11px/1 var(--mono); color: var(--ink-3); }
+.ans-act:hover { color: var(--accent); }
+.ans-followups { margin-top: 16px; }
+.ans-followups .starter-row { margin-top: 8px; }
+
+/* ── The live pipeline ──────────────────────────────────────────────────────
+   A gated answer CANNOT be token-streamed: the gate runs after generation, so
+   streaming raw text would put ungated sentences in front of the reader. What
+   streams is the work. Every event is typed at the publish site; this colours
+   on `kind` alone and never pattern-matches server prose. */
+.ans-progress { color: var(--ink-faint); font-size: 13.5px; }
+.ans-progress-trail { display: flex; flex-direction: column; gap: 4px; }
+.prog {
+  display: flex; align-items: baseline; gap: 10px;
+  font-size: 12.5px; line-height: 1.5; color: var(--ink-3);
+  border-left: 2px solid var(--line); padding: 3px 0 3px 10px;
+  animation: fade-rise var(--dur) var(--ease);
+}
+.prog-k {
+  font: 600 9.5px/1 var(--mono); letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--ink-faint); min-width: 62px;
+}
+.prog.is-live { color: var(--ink); border-left-color: var(--accent); }
+.prog.is-live .prog-k { color: var(--accent); }
+.prog-verify.is-live { border-left-color: var(--ok); }
+.prog-verify.is-live .prog-k { color: var(--ok); }
+.prog-recover.is-live, .prog-error { border-left-color: var(--warn); }
+.prog-recover.is-live .prog-k { color: var(--warn); }
+
+/* ── Refusals ───────────────────────────────────────────────────────────────
+   Exactly ONE refusal kind is a statement about the corpus (`empty_corpus`, and
+   the guardrail's decision about the question). Every other kind is a statement
+   about VERISCOPE — we read passages and could not establish an answer — and
+   colouring them alike is the same error the cell-state table forbids in the
+   matrix: publishing our own limitation as a fact about the literature. */
+.refusal.is-corpus { background: var(--warn-soft); border-color: #ebd8b3; border-left-color: var(--warn); }
+.refusal.is-corpus h4 { color: var(--warn); }
+.refusal.is-ours { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--ink-3); }
+.refusal.is-ours h4 { color: var(--ink); }
+.refusal-note { margin-top: 8px; color: var(--ink-3) !important; font-size: 12.5px !important; }
+.refusal-read { margin-top: 12px; }
+.refusal-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 500 11.5px/1 var(--mono); color: var(--ink-2);
+}
+.refusal-toggle:hover { color: var(--accent); }
+.refusal-passages { margin-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+.refusal-passages li { list-style: none; border-left: 2px solid var(--line); padding-left: 10px; }
+.refusal-passages .rp-src { display: block; font: 500 10.5px/1.4 var(--mono); color: var(--ink-3); }
+.refusal-passages .rp-snip { display: block; margin-top: 4px; font-size: 12.5px; line-height: 1.55; color: var(--ink-2); }
+.refusal-next { margin-top: 16px; }
+.refusal-next .starter-row { margin-top: 8px; }
+
 .ask-bar { position: sticky; bottom: 0; padding: 16px 0 8px; background: linear-gradient(to top, var(--bg) 70%, transparent); }
-.ask-row { display: flex; gap: 8px; }
+.ask-row { display: flex; gap: 8px; align-items: flex-end; }
 .ask-row .input { flex: 1; }
+.ask-input { resize: none; min-height: 42px; max-height: 180px; font-family: var(--ui); line-height: 1.5; }
+.ask-hint { margin-top: 6px; font: 500 10.5px/1 var(--mono); color: var(--ink-faint); }
 
 /* ══════════════════════════════════════════════════════════════════════════
    SOURCES (documents)
@@ -3480,3 +3585,263 @@ p { margin: 0; }
   font-family: var(--font-ui), sans-serif; font-size: 11.5px;
   color: var(--ink-3); margin-top: 6px;
 }
+
+/* ==========================================================================
+   DEMO HOOK OVERLAY  (components/DemoHook.tsx)
+   A prop, not a surface: it impersonates a GENERIC third-party AI assistant
+   so the landing page can show the failure Veriscope exists to prevent.
+   Everything is scoped to #vhook and defines its own local variables on
+   purpose — using our tokens here would make somebody else's product look
+   like ours and kill the reveal. This is the one place in the app where the
+   design system is deliberately not applied; do not "fix" it by tokenising.
+   ========================================================================== */
+#vhook {
+  --k-bg: #f7f8fa; --k-panel: #fff; --k-line: #e6e8ee; --k-line-soft: #eef0f4;
+  --k-ink: #14161c; --k-ink2: #3d4351; --k-ink3: #727a8c; --k-ink4: #9aa2b2;
+  --k-brand: #4f5bd5; --k-brand-soft: #eef0fd; --k-bad: #c0392f; --k-mark: #ffd9d4;
+  --k-ui: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --k-serif: Georgia, "Times New Roman", serif;
+  --k-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --k-ease: cubic-bezier(.22, .61, .36, 1);
+  position: fixed; inset: 0; z-index: 9000;
+  background: var(--k-bg); color: var(--k-ink);
+  font-family: var(--k-ui); font-size: clamp(13px, 0.86vw, 18px); line-height: 1.55;
+  overflow: hidden; opacity: 0; visibility: hidden; transform: scale(1.015);
+  transition: opacity .9s var(--k-ease), transform .9s var(--k-ease), visibility 0s linear .9s;
+}
+/* Asymmetric on purpose: opening must feel like a click (fast), closing is the
+   demo's 0:35 dissolve into the hero underneath (slow). A transition belongs to
+   the state being entered, so the .on rule times the open and the rule above
+   times the close. */
+#vhook.on {
+  opacity: 1; visibility: visible; transform: none;
+  transition: opacity .38s var(--k-ease), transform .38s var(--k-ease), visibility 0s;
+}
+#vhook * { box-sizing: border-box; }
+#vhook p { margin: 0; }
+body.vhook-locked { overflow: hidden; }
+
+#vhook .vh-app {
+  display: grid; grid-template-columns: 15.5rem 1fr; height: 100%;
+  transition: transform 1.05s var(--k-ease); transform-origin: 50% 18%; will-change: transform;
+}
+#vhook.zoom .vh-app { transform: scale(1.26); }
+#vhook .vh-dim { transition: opacity .8s var(--k-ease), filter .8s var(--k-ease); }
+#vhook.zoom .vh-dim { opacity: .13; filter: blur(1.5px); }
+#vhook.zoom .vh-side, #vhook.zoom .vh-top, #vhook.zoom .vh-composer {
+  opacity: .16; filter: blur(1px);
+  transition: opacity .8s var(--k-ease), filter .8s var(--k-ease);
+}
+
+#vhook .vh-side {
+  border-right: 1px solid var(--k-line); background: #fbfcfd; padding: 1.15rem .9rem;
+  display: flex; flex-direction: column; gap: .35rem;
+}
+#vhook .vh-brandrow { display: flex; align-items: center; gap: .55rem; padding: .15rem .35rem 1.15rem; }
+#vhook .vh-glyph {
+  width: 1.55rem; height: 1.55rem; border-radius: .45rem; flex: 0 0 auto;
+  background: linear-gradient(140deg, #6b76ea, #3f49b8);
+  display: grid; place-items: center; color: #fff; font-size: .8rem; font-weight: 700;
+}
+#vhook .vh-brandname { font-weight: 600; font-size: .95rem; letter-spacing: -.01em; color: var(--k-ink); }
+#vhook .vh-newchat {
+  display: flex; align-items: center; gap: .5rem; padding: .5rem .6rem;
+  border: 1px solid var(--k-line); border-radius: .55rem; background: #fff;
+  font-size: .82rem; color: var(--k-ink2); margin-bottom: 1rem;
+}
+#vhook .vh-sgroup {
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--k-ink4); padding: .9rem .6rem .35rem;
+}
+#vhook .vh-sitem {
+  padding: .42rem .6rem; border-radius: .45rem; font-size: .82rem; color: var(--k-ink2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#vhook .vh-sitem.on { background: #eef0f6; color: var(--k-ink); font-weight: 500; }
+#vhook .vh-sfoot {
+  margin-top: auto; display: flex; align-items: center; gap: .55rem;
+  padding: .55rem .6rem; font-size: .8rem; color: var(--k-ink3);
+}
+#vhook .vh-avatar { width: 1.5rem; height: 1.5rem; border-radius: 50%; background: #d8dce6; }
+
+#vhook .vh-main { position: relative; overflow: hidden; display: flex; flex-direction: column; }
+#vhook .vh-top {
+  height: 3.1rem; border-bottom: 1px solid var(--k-line); display: flex; align-items: center;
+  gap: .6rem; padding: 0 1.4rem; background: rgba(255,255,255,.72); flex: 0 0 auto;
+}
+#vhook .vh-chip {
+  font-size: .74rem; color: var(--k-ink2); border: 1px solid var(--k-line); background: #fff;
+  padding: .2rem .55rem; border-radius: 999px; display: inline-flex; align-items: center; gap: .35rem;
+}
+#vhook .vh-dot { width: .38rem; height: .38rem; border-radius: 50%; background: #3aa76d; }
+#vhook .vh-spacer { flex: 1; }
+#vhook .vh-scroll { flex: 1; overflow: hidden; display: flex; justify-content: center; }
+#vhook .vh-thread { width: min(52rem, 90%); padding: 2.6rem 0 3rem; }
+
+#vhook .vh-q { display: flex; gap: .85rem; align-items: flex-start; margin-bottom: 2.1rem; }
+#vhook .vh-qav { width: 1.7rem; height: 1.7rem; border-radius: 50%; background: #dfe3ec; flex: 0 0 auto; margin-top: .1rem; }
+#vhook .vh-qtext { font-size: 1.06rem; font-weight: 500; line-height: 1.5; color: var(--k-ink); }
+#vhook .vh-a { display: flex; gap: .85rem; align-items: flex-start; }
+#vhook .vh-aav {
+  width: 1.7rem; height: 1.7rem; border-radius: .5rem; flex: 0 0 auto; margin-top: .15rem;
+  background: linear-gradient(140deg, #6b76ea, #3f49b8);
+  display: grid; place-items: center; color: #fff; font-size: .72rem; font-weight: 700;
+}
+#vhook .vh-abody { flex: 1; min-width: 0; }
+#vhook .vh-answer {
+  font-family: var(--k-serif); font-size: 1.14rem; line-height: 1.72; color: #1b1e26;
+  transition: color .8s var(--k-ease);
+}
+#vhook .vh-answer p { margin: 0 0 1.05rem; }
+#vhook .vh-answer p:last-child { margin-bottom: 0; }
+#vhook .vh-claim {
+  border-radius: .2rem;
+  transition: background .45s var(--k-ease), box-shadow .45s var(--k-ease), color .8s var(--k-ease);
+}
+#vhook.zoom .vh-answer { color: #c3c6cf; }
+#vhook.zoom .vh-claim { color: #1b1e26; background: #fbe3df; box-shadow: 0 0 0 .5rem #fbe3df; }
+#vhook.zoom .vh-claim b { box-shadow: inset 0 -.12em 0 rgba(192,57,47,.55); }
+#vhook.zoom .vh-cite { background: #f4d3cd; color: var(--k-bad); }
+
+#vhook .vh-cite {
+  font-family: var(--k-mono); font-size: .62em; font-weight: 500; vertical-align: .42em;
+  margin-left: .12em; padding: .12em .3em; border-radius: .28em;
+  color: var(--k-brand); background: var(--k-brand-soft); cursor: pointer;
+  transition: background .25s var(--k-ease), color .25s var(--k-ease),
+              box-shadow .25s var(--k-ease), transform .25s var(--k-ease);
+}
+#vhook .vh-cite:hover { background: #e2e5fb; }
+#vhook .vh-cite.pulse { animation: vhookPulse 1.9s var(--k-ease) infinite; }
+@keyframes vhookPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79,91,213,.35); }
+  55% { box-shadow: 0 0 0 .42rem rgba(79,91,213,0); }
+}
+#vhook .vh-cite.hot { background: #dfe2fb; transform: translateY(-.05em); }
+
+#vhook .vh-srcwrap { margin-top: 1.9rem; padding-top: 1.15rem; border-top: 1px solid var(--k-line-soft); }
+#vhook .vh-srclabel {
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--k-ink4); margin-bottom: .7rem;
+}
+#vhook .vh-srcs { display: grid; grid-template-columns: repeat(3, 1fr); gap: .7rem; }
+#vhook .vh-src { border: 1px solid var(--k-line); background: #fff; border-radius: .6rem; padding: .7rem .8rem; }
+#vhook .vh-srcn { font-family: var(--k-mono); font-size: .64rem; color: var(--k-ink4); margin-bottom: .3rem; }
+#vhook .vh-srct { font-size: .78rem; line-height: 1.4; font-weight: 500; color: var(--k-ink); }
+#vhook .vh-srcm { font-size: .7rem; color: var(--k-ink3); margin-top: .35rem; }
+#vhook .vh-tools { display: flex; gap: .9rem; margin-top: 1.4rem; color: var(--k-ink4); font-size: .75rem; }
+#vhook .vh-composer { flex: 0 0 auto; display: flex; justify-content: center; padding: 0 0 1.5rem; }
+#vhook .vh-cbox {
+  width: min(52rem, 90%); border: 1px solid var(--k-line); background: #fff; border-radius: .9rem;
+  padding: .85rem 1rem; display: flex; align-items: center; gap: .7rem;
+}
+#vhook .vh-cph { color: var(--k-ink4); font-size: .92rem; }
+#vhook .vh-csend {
+  margin-left: auto; width: 1.9rem; height: 1.9rem; border-radius: .55rem;
+  background: #eceef5; display: grid; place-items: center; color: var(--k-ink4);
+}
+
+#vhook .vh-paper {
+  position: absolute; inset: 0 0 0 42%; background: var(--k-panel);
+  border-left: 1px solid var(--k-line); box-shadow: -24px 0 60px rgba(16,20,32,.13);
+  transform: translateX(102%); transition: transform .62s var(--k-ease);
+  display: flex; flex-direction: column; z-index: 20;
+}
+#vhook.paper-open .vh-paper { transform: translateX(0); }
+#vhook .vh-scrim {
+  position: absolute; inset: 0; background: rgba(14,17,26,.14); opacity: 0;
+  pointer-events: none; transition: opacity .5s var(--k-ease); z-index: 10;
+}
+#vhook.paper-open .vh-scrim { opacity: 1; }
+#vhook .vh-phead { padding: 1.1rem 1.6rem; border-bottom: 1px solid var(--k-line); flex: 0 0 auto; }
+#vhook .vh-pmeta {
+  display: flex; align-items: center; gap: .5rem; font-size: .7rem;
+  color: var(--k-ink3); margin-bottom: .5rem;
+}
+#vhook .vh-pbadge {
+  font-family: var(--k-mono); font-size: .64rem; border: 1px solid var(--k-line);
+  border-radius: .3rem; padding: .1rem .35rem; color: var(--k-ink2);
+}
+#vhook .vh-ptitle { font-family: var(--k-serif); font-size: 1.12rem; line-height: 1.35; font-weight: 600; color: var(--k-ink); }
+#vhook .vh-pauth { font-size: .76rem; color: var(--k-ink3); margin-top: .35rem; }
+#vhook .vh-pscroll {
+  flex: 1; overflow: hidden; position: relative; padding: 1.7rem 1.6rem 9rem;
+  font-family: var(--k-serif); font-size: .95rem; line-height: 1.78; color: #242832;
+}
+#vhook .vh-pscroll h4 {
+  font-family: var(--k-ui); font-size: .7rem; letter-spacing: .11em; text-transform: uppercase;
+  color: var(--k-ink4); margin: 1.9rem 0 .6rem; font-weight: 600;
+}
+#vhook .vh-pscroll h4:first-child { margin-top: 0; }
+#vhook .vh-pscroll p { margin: 0 0 1rem; }
+#vhook .vh-pg {
+  font-family: var(--k-mono); font-size: .6rem; color: var(--k-ink4);
+  border-top: 1px dashed var(--k-line); padding-top: .45rem; margin: 2rem 0 1.4rem;
+}
+#vhook .vh-hl {
+  border-radius: .15rem; padding: .06em 0;
+  background: linear-gradient(90deg, var(--k-mark), var(--k-mark)) 0 0 / 0% 100% no-repeat;
+  transition: background-size .85s var(--k-ease);
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+#vhook.marked .vh-hl { background-size: 100% 100%; }
+#vhook .vh-hlmark {
+  position: absolute; left: 0; top: 0; bottom: 0; width: .18rem; background: var(--k-bad);
+  border-radius: 2px; opacity: 0; transform: scaleY(.4); transform-origin: top;
+  transition: opacity .5s var(--k-ease) .15s, transform .6s var(--k-ease) .15s;
+}
+#vhook.marked .vh-hlmark { opacity: 1; transform: scaleY(1); }
+#vhook .vh-hlwrap { position: relative; padding-left: 1rem; margin-left: -1rem; }
+
+#vhook .vh-verdict {
+  position: absolute; left: 1.6rem; right: 1.6rem; bottom: 1.4rem; background: #fff;
+  border: 1px solid var(--k-line); border-radius: .7rem; padding: .95rem 1.05rem;
+  box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 40px rgba(16,20,32,.10);
+  opacity: 0; transform: translateY(.9rem);
+  transition: opacity .5s var(--k-ease), transform .5s var(--k-ease);
+  z-index: 5; font-family: var(--k-ui);
+}
+#vhook.verdict-on .vh-verdict { opacity: 1; transform: none; }
+#vhook .vh-vrow { display: flex; gap: .75rem; align-items: flex-start; padding: .42rem 0; }
+#vhook .vh-vtag {
+  font-family: var(--k-mono); font-size: .6rem; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--k-ink3); width: 4.6rem; flex: 0 0 auto; padding-top: .14rem;
+}
+#vhook .vh-vtxt { font-size: .8rem; line-height: 1.5; color: var(--k-ink2); }
+#vhook .vh-vtxt em { font-style: normal; background: var(--k-mark); border-radius: .15rem; padding: .02em .18em; }
+#vhook .vh-vsplit { border-top: 1px solid var(--k-line-soft); margin: .35rem 0; }
+#vhook .vh-vres { display: flex; gap: 1.3rem; padding-top: .55rem; font-size: .75rem; }
+#vhook .vh-ok { color: #2f7d55; }
+#vhook .vh-no { color: var(--k-bad); }
+
+/* presenter HUD — auto-hides after 2.2s so it never lands in a recording */
+.vhook-hud {
+  position: fixed; right: 16px; bottom: 16px; z-index: 9100;
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(20,22,28,.86); color: #fff; border-radius: 999px;
+  padding: 6px 8px 6px 14px; font: 500 11px/1.4 system-ui, sans-serif;
+  box-shadow: 0 8px 30px rgba(0,0,0,.28);
+  opacity: 0; transform: translateY(6px); pointer-events: none;
+  transition: opacity .35s cubic-bezier(.22,.61,.36,1), transform .35s cubic-bezier(.22,.61,.36,1);
+}
+.vhook-hud.show { opacity: 1; transform: none; pointer-events: auto; }
+.vhook-hud .k { font-family: ui-monospace, Menlo, monospace; font-size: 10px; opacity: .6; }
+.vhook-hud .hb {
+  width: 22px; height: 22px; border-radius: 50%; border: 0; cursor: pointer;
+  background: rgba(255,255,255,.12); color: #fff;
+  display: grid; place-items: center; font-size: 12px;
+}
+.vhook-hud .hb:hover { background: rgba(255,255,255,.22); }
+.vhook-hud .hb:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  #vhook, #vhook *, .vhook-hud { transition-duration: .001ms !important; animation: none !important; }
+}
+#vhook:focus{outline:none}
+#vhook:focus-visible{outline:none}
+
+/* An empty comparison cell says WHOSE limitation it is. `not_addressed` is the
+   paper's and stays neutral; every other state is ours and is flagged, so a
+   table full of our own failures can never read as a finding about the corpus
+   (which is exactly what a chunk-id mismatch made it do). */
+.compare-cell-gap.is-ours { color: var(--warn); font-style: normal; }
+.compare-cell-gap.is-paper { color: var(--ink-faint); }

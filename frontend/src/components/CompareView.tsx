@@ -186,13 +186,34 @@ export default function CompareView({ projectId, preselect }: { projectId: strin
   );
 }
 
+// An empty cell must not assert a fact about the paper unless that is what
+// happened. Only `not_addressed` is the paper's; everything else — including a
+// pre-state comparison whose cause was never recorded — reads as ours.
+const EMPTY_LABEL: Record<string, string> = {
+  not_addressed: "— not addressed",
+  no_passages: "— no passages retrieved",
+  unverified: "— could not verify",
+  failed: "— cell failed to build",
+};
+
+function emptyLabel(state?: string): string {
+  return (state && EMPTY_LABEL[state]) || "— not established";
+}
+
+// The paper's limitation is neutral; ours is flagged, so a table full of our
+// own failures cannot be mistaken for a finding about the corpus.
+function emptyClass(state?: string): string {
+  return state === "not_addressed" ? "is-paper" : "is-ours";
+}
+
+
 function ComparisonTable({ comp, onCell, onExport, onToggleReport }: {
   comp: Comparison;
   onCell: (claimId: string) => void;
   onExport: () => void;
   onToggleReport: () => void;
 }) {
-  const filled = comp.matrix.reduce((n, row) => n + comp.documents.filter((d) => row.cells[d.id]).length, 0);
+  const filled = comp.matrix.reduce((n, row) => n + comp.documents.filter((d) => row.cells[d.id]?.verified).length, 0);
   const total = comp.matrix.length * comp.documents.length;
   return (
     <div className="compare-result">
@@ -228,15 +249,21 @@ function ComparisonTable({ comp, onCell, onExport, onToggleReport }: {
                 <th className="compare-dim-col">{row.dimension}</th>
                 {comp.documents.map((d) => {
                   const c = row.cells[d.id];
+                  const ok = !!c?.verified;
                   return (
-                    <td key={d.id} className={c ? "compare-cell filled" : "compare-cell empty"}
-                        onClick={() => c && onCell(c.claim_id)} title={c ? "Click to see the exact source passage" : ""}>
-                      {c ? (
+                    <td key={d.id} className={ok ? "compare-cell filled" : "compare-cell empty"}
+                        onClick={() => ok && onCell(c!.claim_id)}
+                        title={ok ? "Click to see the exact source passage" : (c?.reason || "")}>
+                      {ok ? (
                         <>
-                          <span className="compare-cell-claim">{c.claim}</span>
-                          <span className="compare-cell-quote">“{c.quote}”</span>
+                          <span className="compare-cell-claim">{c!.claim}</span>
+                          <span className="compare-cell-quote">“{c!.quote}”</span>
                         </>
-                      ) : (<span className="compare-cell-gap">— not addressed</span>)}
+                      ) : (
+                        <span className={`compare-cell-gap ${emptyClass(c?.state)}`}>
+                          {emptyLabel(c?.state)}
+                        </span>
+                      )}
                     </td>
                   );
                 })}

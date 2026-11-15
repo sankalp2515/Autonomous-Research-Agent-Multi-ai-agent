@@ -55,6 +55,47 @@ export interface TechnicalHit {
   snippet: string;
 }
 
+// One sentence of an answer, carrying the type it is. The report contract's
+// four sentence types reach the conversation unchanged:
+//   E  evidential  - quote-verified, carries a claim_id and a footnote
+//   D  derived     - computed from counts, carries a basis and its row-set,
+//                    and is NEVER given a footnote (one paper would
+//                    misrepresent a sentence derived from many)
+//   S  structural  - asserts nothing
+// I (interpretive) is designed but deliberately not shipped.
+export type SegmentType = "E" | "D" | "S" | "I";
+
+export interface AnswerSegment {
+  type: SegmentType;
+  text: string;
+  claim_id: string;
+  basis: string;
+  doc_ids: string[];
+}
+
+// A passage retrieval DID reach, shown on a refusal so "we could not establish
+// this" is auditable instead of asserted.
+export interface LookedAt {
+  document_id: string;
+  document_title: string;
+  section: string;
+  page_start: number;
+  snippet: string;
+}
+
+export interface AnswerSource {
+  document_id: string;
+  document_title: string;
+  claims: number;
+  abstract_only: boolean;
+}
+
+// Only `empty_corpus` is a statement about the CORPUS. Every other kind is a
+// statement about Veriscope, and the UI must not colour them alike.
+export type RefusalKind =
+  | "guardrail" | "empty_corpus" | "no_support" | "gate_rejected"
+  | "unresolved_selection" | "no_records" | "";
+
 export interface ChatResult {
   answer_id: string;
   refused: boolean;
@@ -62,12 +103,36 @@ export interface ChatResult {
   coverage_note: string;
   claims: Claim[];
   technical_context: TechnicalHit[];
+  segments?: AnswerSegment[];
+  answer_kind?: "evidential" | "derived" | "refusal";
+  refusal_kind?: RefusalKind;
+  looked_at?: LookedAt[];
+  suggestions?: string[];
+  sources?: AnswerSource[];
+  // The standalone form a follow-up was retrieved with, shown so the user can
+  // see how their "why?" was read — and correct us when we read it wrong.
+  resolved_question?: string;
+}
+
+// A typed progress event from /api/chat/stream. `kind` is assigned at the
+// publish site; the client groups and colours on it alone and must never
+// pattern-match the message text.
+export interface ChatProgress {
+  kind: "resolve" | "workspace" | "search" | "corpus" | "draft" | "recover"
+      | "verify" | "error";
+  message: string;
+  passages?: number;
+  documents?: number;
+  drafted?: number;
+  verified?: number;
+  dropped?: number;
 }
 
 export interface ChatTurn {
   question: string;
   result: ChatResult | null;
   error?: string;
+  progress?: ChatProgress[];
 }
 
 // The run clock is computed SERVER-side against one reference `now`.
@@ -508,6 +573,9 @@ export interface Report {
       found?: number;
       screened?: number;
       screened_out?: number;
+      // "researcher" when the candidates were screened by a human in the
+      // pre-run screening table, "screen" when the pipeline screened them.
+      screened_by?: string;
       extracted_studies?: number;
       extracted_findings?: number;
       extraction_refused?: number;
@@ -716,6 +784,19 @@ export interface RefindHit {
   abstract_only: boolean;
 }
 
+// Why a comparison cell is empty. Exactly ONE of these is a statement about the
+// paper; the rest are statements about Veriscope. They used to be collapsed
+// into a single em-dash captioned "not addressed", so a systemic failure of
+// ours — every cell failing the gate on a chunk-id mismatch — rendered as a
+// confident finding about five papers. Same doctrine as `CellState` in the
+// evidence matrix: absence of evidence is not evidence of absence.
+export type CompareCellState =
+  | "reported"        // a gate-verified finding
+  | "not_addressed"   // the passages were read and do not speak to this — the PAPER
+  | "no_passages"     // retrieval reached nothing for this axis — ours
+  | "unverified"      // a claim was drafted and the gate rejected it — ours
+  | "failed";         // the cell errored — ours
+
 export interface CompareCell {
   claim: string;
   quote: string;
@@ -723,6 +804,10 @@ export interface CompareCell {
   claim_id: string;
   page: number;
   verified: boolean;
+  // Absent on comparisons built before cell states shipped; those fall back to
+  // the neutral "not established", which is true whichever cause applied.
+  state?: CompareCellState;
+  reason?: string;
 }
 
 export interface Comparison {

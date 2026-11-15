@@ -7,6 +7,7 @@
 // tensions, closed corpus) are real. Scoped under #vlp so its styles never leak.
 
 import { useEffect, useState } from "react";
+import DemoHook from "./DemoHook";
 
 const scrollTo = (id: string) =>
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -70,6 +71,9 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
   const [plStep, setPlStep] = useState(4);
   const [faqOpen, setFaqOpen] = useState(0);
   const [copied, setCopied] = useState(false);
+  // The demo hook: a generic assistant's confident, unsupported answer. It is
+  // the argument for the whole product, so it opens from the hero.
+  const [hookOpen, setHookOpen] = useState(false);
 
   useEffect(() => {
     const io = new IntersectionObserver(
@@ -86,6 +90,8 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
 
   return (
     <div id="vlp">
+      <DemoHook open={hookOpen} onClose={() => setHookOpen(false)} />
+
       {/* NAV */}
       <header className="vlp-nav"><div className="vlp-wrap vlp-nav-in">
         <div className="vlp-brand"><span className="vlp-logo">V</span><div><b>Veriscope</b><span className="sub">Verifiable research</span></div></div>
@@ -111,6 +117,7 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
           <p className="vlp-lead">Most AI research tools fabricate — plausible summaries with citations that are subtly wrong. Veriscope flips the default: <b>nothing reaches you unless it survives a verification gate.</b> Every claim is quote-matched to a real source, or it isn’t shown.</p>
           <div className="vlp-hero-cta">
             <button className="vlp-btn vlp-btn-accent" onClick={onEnter}>Start researching {I.arrow}</button>
+            <button className="vlp-btn vlp-btn-ghost" onClick={() => setHookOpen(true)}>See the problem</button>
             <button className="vlp-btn vlp-btn-ghost" onClick={() => scrollTo("vlp-pipeline")}>See how it works</button>
           </div>
           <div className="vlp-chips">

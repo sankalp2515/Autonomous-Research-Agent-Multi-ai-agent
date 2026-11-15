@@ -110,8 +110,15 @@ function Flow({ report }: { report: Report }) {
 
   if (!discovered && !screened) return null;
 
+  // A curated run's candidates were screened by the RESEARCHER, against the
+  // same published criteria. That is a stronger provenance claim than a model
+  // screen, so the diagram states it instead of implying the pipeline did it.
+  const byHuman = f.screened_by === "researcher";
+
   return (
-    <div className="sr-prisma">
+    <section className="sr-sec">
+      <h2>Flow</h2>
+      <div className="sr-prisma">
       {discovered ? (
         <>
           <div className="sr-prow">
@@ -130,6 +137,7 @@ function Flow({ report }: { report: Report }) {
             ? <>Screened on abstracts against {criteria.length} criteria:<br />
                 {criteria.map((c) => c.name).join(" · ")}<br /></>
             : <>Screened on titles and abstracts<br /></>}
+          {byHuman ? <>reviewed and approved by the researcher<br /></> : null}
           <b>n = {screened ?? discovered}</b>
         </div>
       </div>
@@ -193,7 +201,8 @@ function Flow({ report }: { report: Report }) {
           </div>
         </>
       ) : null}
-    </div>
+      </div>
+    </section>
   );
 }
 
@@ -1086,10 +1095,11 @@ export function SystematicReview({ report }: { report: Report }) {
             number here is a real tally.
           </p>
 
-          <section className="sr-sec">
-            <h2>Flow</h2>
-            <Flow report={report} />
-          </section>
+          {/* The heading lives INSIDE `Flow`. It used to sit here, and `Flow`
+              returns null when the funnel recorded no discovery or screening —
+              so a curated run rendered the word "Flow" over nothing at all,
+              which reads as broken software rather than as absent data. */}
+          <Flow report={report} />
 
           {criteria.length ? (
             <section className="sr-sec">

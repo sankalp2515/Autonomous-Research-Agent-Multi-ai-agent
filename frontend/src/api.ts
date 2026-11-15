@@ -197,7 +197,8 @@ export const api = {
     projectId: string,
     question: string,
     documentId?: string,
-    entityRefs?: { kind: string; id: string }[]
+    entityRefs?: { kind: string; id: string }[],
+    history?: { question: string; answer: string }[]
   ) =>
     request<ChatResult>("/api/chat", {
       method: "POST",
@@ -206,8 +207,85 @@ export const api = {
         question,
         document_id: documentId ?? null,
         entity_refs: entityRefs && entityRefs.length ? entityRefs : null,
+        history: history && history.length ? history.slice(-6) : null,
       }),
     }),
+
+  // Ask, with the PIPELINE streamed while the answer is produced.
+  //
+  // The answer text is NOT streamed and cannot be: the verification gate runs
+  // after generation, so streaming raw tokens would put ungated text in front
+  // of the reader. What arrives progressively is the work — searching, N
+  // passages from M documents, drafting, verifying — and then the finished,
+  // gate-verified answer in one `event: answer` frame.
+  //
+  // Returns a stop() that aborts the request.
+  chatStream: (
+    body: {
+      projectId: string;
+      question: string;
+      documentId?: string;
+      entityRefs?: { kind: string; id: string }[];
+      history?: { question: string; answer: string }[];
+    },
+    onProgress: (p: import("./types").ChatProgress) => void,
+    onAnswer: (r: ChatResult) => void,
+    onError: (message: string) => void
+  ) => {
+    const ctrl = new AbortController();
+    (async () => {
+      let settled = false;
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        const token = getToken();
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const resp = await fetch("/api/chat/stream", {
+          method: "POST", headers, signal: ctrl.signal,
+          body: JSON.stringify({
+            project_id: body.projectId,
+            question: body.question,
+            document_id: body.documentId ?? null,
+            entity_refs: body.entityRefs && body.entityRefs.length ? body.entityRefs : null,
+            history: body.history && body.history.length ? body.history.slice(-6) : null,
+          }),
+        });
+        if (!resp.ok || !resp.body) {
+          onError(`Request failed (${resp.status})`);
+          settled = true;
+          return;
+        }
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const frames = buf.split("\n\n");
+          buf = frames.pop() || "";
+          for (const frame of frames) {
+            const lines = frame.split("\n");
+            const evLine = lines.find((l) => l.startsWith("event:"));
+            const dataLine = lines.find((l) => l.startsWith("data:"));
+            if (!dataLine) continue;  // keep-alive comment frame
+            const ev = evLine ? evLine.slice(6).trim() : "";
+            let payload: unknown;
+            try { payload = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
+            if (ev === "answer") { settled = true; onAnswer(payload as ChatResult); }
+            else if (ev === "error") {
+              settled = true;
+              onError(String((payload as { message?: string })?.message || "Request failed"));
+            } else if (!ev) onProgress(payload as import("./types").ChatProgress);
+          }
+        }
+        // A stream that ends without a verdict is a failure, not a silence.
+        if (!settled) onError("The connection closed before the answer arrived.");
+      } catch (err) {
+        if (!ctrl.signal.aborted) onError(String((err as Error)?.message ?? err));
+      }
+    })();
+    return () => ctrl.abort();
+  },
   // Durable corpus-chat history — restores the Ask conversation after a refresh.
   listAnswers: (projectId: string) =>
     request<(ChatResult & { question: string; created_at: string })[]>(`/api/projects/${projectId}/answers`),

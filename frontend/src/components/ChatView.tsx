@@ -1,11 +1,236 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { ChatTurn } from "../types";
+import type {
+  AnswerSegment, ChatProgress, ChatResult, ChatTurn, RefusalKind,
+} from "../types";
 import EvidenceDrawer from "./EvidenceDrawer";
-import { Empty, Spinner, Stamp } from "./ui";
+import { Empty, Spinner } from "./ui";
 import { Icon } from "./icons";
 import { useEvidence } from "../evidence";
 import { useChatContext, AddToChat } from "../chatctx";
+
+/**
+ * Ask — the grounded follow-up conversation.
+ *
+ * THREE THINGS THIS FILE IS DELIBERATELY NOT.
+ *
+ * 1. It is not a claim list. An answer renders as FLOWING PROSE with mono
+ *    superscript footnotes — the treatment the report and the paper drawer
+ *    already use. The old corpus view stacked each verified claim as its own
+ *    card, which read as search results rather than an answer, and buried the
+ *    fact that the claims were written to be read in sequence.
+ *
+ * 2. It does not stream tokens. It cannot: the verification gate runs after
+ *    generation, so streaming raw text would put ungated sentences in front of
+ *    the reader and break G1/G2. What streams is the PIPELINE — searching, N
+ *    passages from M documents, drafting, verifying — which is honest and is
+ *    the part worth watching. Progress events are typed at the publish site and
+ *    grouped on `kind` alone; nothing here pattern-matches server prose.
+ *
+ * 3. It does not treat every refusal alike. Exactly one refusal kind
+ *    (`empty_corpus`) is a statement about the corpus. The rest are statements
+ *    about Veriscope, and a refusal that says "your corpus lacks this" when it
+ *    means "we could not establish this" is the same error the cell-state table
+ *    forbids in the matrix. So a refusal shows what it read, what this corpus
+ *    covers, and what it CAN answer.
+ */
+
+// Every sentence declares its type — E evidential, D derived, S structural.
+// G6: the reader can always tell which one they are reading.
+function Sentence({ seg, onCite }: { seg: AnswerSegment; onCite: (id: string) => void }) {
+  if (seg.type === "E") {
+    return (
+      <span className="ans-s ans-e">
+        {seg.text.trim()}{" "}
+        {seg.claim_id && (
+          <sup className="rp-cite" title="Click to read the verbatim source span"
+               onClick={() => onCite(seg.claim_id)}>&#8226;</sup>
+        )}{" "}
+      </span>
+    );
+  }
+  if (seg.type === "D") {
+    // A derived sentence is NEVER given a footnote: a citation to one paper
+    // would misrepresent a sentence computed from many. Its provenance
+    // affordance is the row-set and the basis it was computed from.
+    return (
+      <span className="ans-s ans-d" title={seg.basis || undefined}>
+        {seg.text.trim()}
+        {seg.doc_ids?.length ? (
+          <span className="ans-rowset">{seg.doc_ids.length} rows</span>
+        ) : null}{" "}
+      </span>
+    );
+  }
+  return <span className="ans-s ans-struct">{seg.text.trim()} </span>;
+}
+
+const REFUSAL_TITLE: Record<string, string> = {
+  empty_corpus: "Nothing in this corpus matched",
+  no_support: "Could not establish this",
+  gate_rejected: "Drafted, then refused by the gate",
+  guardrail: "Outside what Ask will answer",
+  unresolved_selection: "That selection resolved to nothing",
+  no_records: "No run records yet",
+};
+
+// Only `empty_corpus` is a fact about the corpus. Everything else is a fact
+// about us, and reads as the softer amber caveat rather than a verdict.
+const ABOUT_CORPUS = new Set<RefusalKind>(["empty_corpus", "guardrail"]);
+
+function Refusal({
+  result, onAsk,
+}: { result: ChatResult; onAsk: (q: string) => void }) {
+  const kind = (result.refusal_kind || "no_support") as RefusalKind;
+  const [open, setOpen] = useState(false);
+  const looked = result.looked_at ?? [];
+  return (
+    <div className={`refusal ${ABOUT_CORPUS.has(kind) ? "is-corpus" : "is-ours"}`}>
+      <h4>{REFUSAL_TITLE[kind] || "Refused — honestly"}</h4>
+      <p>{result.refusal_reason}</p>
+      {result.coverage_note && <p className="refusal-note">{result.coverage_note}</p>}
+
+      {looked.length > 0 && (
+        <div className="refusal-read">
+          <button className="refusal-toggle" onClick={() => setOpen((v) => !v)}>
+            <Icon.chevronRight size={12}
+              style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
+            {open ? "Hide" : "Show"} the {looked.length} passage{looked.length === 1 ? "" : "s"} we read
+          </button>
+          {open && (
+            <ul className="refusal-passages">
+              {looked.map((h, i) => (
+                <li key={h.document_id + i}>
+                  <span className="rp-src">
+                    {h.document_title.slice(0, 80)}
+                    {h.section ? ` · ${h.section.slice(0, 40)}` : ""}
+                    {h.page_start > 0 ? ` · p.${h.page_start}` : ""}
+                  </span>
+                  <span className="rp-snip">{h.snippet}…</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {(result.suggestions?.length ?? 0) > 0 && (
+        <div className="refusal-next">
+          <span className="overline">Questions this workspace can answer</span>
+          <div className="starter-row">
+            {result.suggestions!.map((q) => (
+              <button key={q} className="starter-chip" onClick={() => onAsk(q)}>{q}</button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The live pipeline. One line per stage, the newest one active — so a slow turn
+// says what it is doing instead of spinning.
+function ProgressTrail({ events }: { events: ChatProgress[] }) {
+  if (!events.length) {
+    return <p className="ans-progress"><Spinner /> &nbsp;working…</p>;
+  }
+  return (
+    <ul className="ans-progress-trail">
+      {events.map((e, i) => (
+        <li key={i} className={`prog prog-${e.kind} ${i === events.length - 1 ? "is-live" : ""}`}>
+          <span className="prog-k">{e.kind}</span>
+          <span className="prog-m">{e.message}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Answer({
+  result, question, onCite, onAsk, paper,
+}: {
+  result: ChatResult;
+  question: string;
+  onCite: (id: string) => void;
+  onAsk: (q: string) => void;
+  paper: boolean;
+}) {
+  const segments = useMemo<AnswerSegment[]>(() => {
+    if (result.segments?.length) return result.segments;
+    // A pre-envelope answer (restored history): its claims are all E.
+    return result.claims.map((c) => ({
+      type: "E" as const, text: c.text, claim_id: c.id, basis: "", doc_ids: [],
+    }));
+  }, [result]);
+
+  const counts = useMemo(() => {
+    const e = segments.filter((s) => s.type === "E").length;
+    const d = segments.filter((s) => s.type === "D").length;
+    return { e, d };
+  }, [segments]);
+
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(segments.map((s) => s.text).join(" "));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch { /* clipboard unavailable */ }
+  }
+
+  return (
+    <div className="ans">
+      {result.resolved_question && (
+        <div className="ans-resolved" title="How your follow-up was read for retrieval">
+          <Icon.search size={11} /> read as: {result.resolved_question}
+        </div>
+      )}
+
+      <p className="ans-prose">
+        {segments.map((s, i) => <Sentence key={i} seg={s} onCite={onCite} />)}
+      </p>
+
+      {/* The composition, not a "verified" badge. That badge stops being true
+          the moment a sentence ships that is not quote-verified. */}
+      <div className="ans-foot">
+        <span className="ans-comp">
+          {counts.e} verified{counts.d ? ` · ${counts.d} derived` : ""}
+        </span>
+        {(result.sources?.length ?? 0) > 0 && (
+          <span className="ans-srcs">
+            {result.sources!.map((s) => (
+              <span key={s.document_id} className="ans-src" title={s.document_title}>
+                {s.document_title.slice(0, 44)}
+                {s.abstract_only && <em> abstract only</em>}
+                <b>{s.claims}</b>
+              </span>
+            ))}
+          </span>
+        )}
+        <span className="ans-acts">
+          <button className="ans-act" onClick={copy}>{copied ? "copied" : "copy"}</button>
+          {!paper && (
+            <AddToChat compact item={{ kind: "answer", id: result.answer_id,
+                                       label: `answer · ${question}` }} />
+          )}
+        </span>
+      </div>
+
+      {result.coverage_note && <div className="coverage-note">{result.coverage_note}</div>}
+
+      {(result.suggestions?.length ?? 0) > 0 && (
+        <div className="ans-followups">
+          <span className="overline">Ask next</span>
+          <div className="starter-row">
+            {result.suggestions!.slice(0, 3).map((q) => (
+              <button key={q} className="starter-chip" onClick={() => onAsk(q)}>{q}</button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function ChatView({
   projectId,
@@ -19,6 +244,7 @@ export default function ChatView({
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
+  const stopRef = useRef<(() => void) | null>(null);
   // In the standalone "Ask" view, citations open the persistent app rail. Inside
   // the nested "Ask this paper" drawer, that rail would sit behind the drawer, so
   // there we fall back to a self-contained modal stacked above it.
@@ -50,39 +276,73 @@ export default function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, paper]);
 
+  useEffect(() => () => stopRef.current?.(), []);
+
   const PAPER_STARTERS = isRepo
     ? ["What does this project do?", "How is it implemented?", "What are the key components?", "How do I use it?"]
     : isBlog
     ? ["What is the main argument?", "What does it recommend?", "What evidence is given?", "What are the caveats?"]
     : ["What problem does this paper address?", "What method does it propose?", "What are the key results?", "What are its limitations?"];
 
-  async function submit(q: string) {
+  // A follow-up carries its subject in the conversation. The last few turns go
+  // back with the question so "why?" can be resolved into something a retriever
+  // can search for — the answer text sent is what the user actually read.
+  function historyPayload(): { question: string; answer: string }[] {
+    return turns
+      .filter((t) => t.result)
+      .slice(-4)
+      .map((t) => ({
+        question: t.question,
+        answer: t.result!.refused
+          ? t.result!.refusal_reason
+          : (t.result!.segments?.map((s) => s.text).join(" ")
+             || t.result!.claims.map((c) => c.text).join(" ")).slice(0, 4000),
+      }));
+  }
+
+  function patchLast(patch: Partial<ChatTurn>) {
+    setTurns((t) => t.map((turn, i) => (i === t.length - 1 ? { ...turn, ...patch } : turn)));
+  }
+
+  function submit(q: string) {
     if (!q.trim() || busy) return;
+    const history = historyPayload();
     setQuestion("");
     setBusy(true);
-    setTurns((t) => [...t, { question: q, result: null }]);
+    setTurns((t) => [...t, { question: q, result: null, progress: [] }]);
     setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
-    try {
-      // Hard client timeout: a grounded answer that hasn't returned in ~100s is
-      // stuck (provider throttle / retrieval) — surface an error instead of an
-      // infinite spinner the user can't escape.
-      const timeout = new Promise<never>((_, rej) =>
-        setTimeout(() => rej(new Error("Still working — the model is busy. Your answer keeps generating in the background; refresh in a moment to see it.")), 100_000));
-      const result = await Promise.race([
-        api.chat(projectId, q, documentId,
-          scoped ? chatCtx.items.map((i) => ({ kind: i.kind, id: i.id })) : undefined),
-        timeout,
-      ]);
-      setTurns((t) => t.map((turn, i) => (i === t.length - 1 ? { ...turn, result } : turn)));
-    } catch (err: any) {
-      setTurns((t) => t.map((turn, i) => (i === t.length - 1 ? { ...turn, error: String(err.message ?? err) } : turn)));
-    } finally {
+
+    const finish = () => {
       setBusy(false);
+      stopRef.current = null;
       setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
-    }
+    };
+
+    stopRef.current = api.chatStream(
+      {
+        projectId, question: q, documentId,
+        entityRefs: scoped ? chatCtx.items.map((i) => ({ kind: i.kind, id: i.id })) : undefined,
+        history: paper ? undefined : history,
+      },
+      (p) => setTurns((t) => t.map((turn, i) =>
+        i === t.length - 1 ? { ...turn, progress: [...(turn.progress ?? []), p] } : turn)),
+      (result) => { patchLast({ result }); finish(); },
+      (message) => { patchLast({ error: message }); finish(); },
+    );
+  }
+
+  function stop() {
+    stopRef.current?.();
+    stopRef.current = null;
+    patchLast({ error: "Stopped before the answer finished verifying, so nothing was returned. Ask again to retry." });
+    setBusy(false);
   }
 
   function ask(e: FormEvent) { e.preventDefault(); submit(question.trim()); }
+
+  function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(question.trim()); }
+  }
 
   return (
     <div className={paper ? "" : "content-narrow"} style={paper ? {} : { padding: 0 }}>
@@ -108,13 +368,24 @@ export default function ChatView({
           </div>
         </div>
       )}
+
       {turns.length === 0 && !paper && !scoped && (
-        <Empty glyph="❝" title="Ask your corpus">
-          Every claim in an answer carries a verbatim quote from a specific document — click any
-          claim to inspect its evidence trail. If your corpus can’t support an answer, Veriscope
-          refuses instead of guessing.
-        </Empty>
+        <div>
+          <Empty glyph="❝" title="Ask your corpus">
+            Follow-ups are answered from what this project has read. Every factual
+            sentence carries a verbatim quote you can click; sentences derived from
+            study counts are labelled as derived. When the corpus cannot support an
+            answer, Veriscope says so — and shows you what it read.
+          </Empty>
+          <div className="starter-row">
+            {["What is this report about?", "What did you find?",
+              "What are the open gaps?", "Which papers are in this corpus?"].map((s) => (
+              <button key={s} className="starter-chip" onClick={() => submit(s)}>{s}</button>
+            ))}
+          </div>
+        </div>
       )}
+
       {turns.length === 0 && paper && (
         <div>
           <Empty glyph="❝" title={`Ask this ${docNoun}`}>
@@ -135,66 +406,20 @@ export default function ChatView({
           <div key={i} className="chat-turn">
             <div className="chat-q">{turn.question}</div>
             <div className="chat-a">
-              {!turn.result && !turn.error && (
-                <p style={{ color: "var(--ink-faint)" }}><Spinner /> &nbsp;retrieving, drafting, verifying…</p>
-              )}
+              {!turn.result && !turn.error && <ProgressTrail events={turn.progress ?? []} />}
               {turn.error && (
-                <div className="refusal"><h4>Request failed</h4><p>{turn.error}</p></div>
+                <div className="refusal is-ours"><h4>Request failed</h4><p>{turn.error}</p></div>
               )}
-              {turn.result?.refused && (
-                <div className="refusal">
-                  <h4>Refused — honestly</h4>
-                  <p>{turn.result.refusal_reason}</p>
-                  {turn.result.coverage_note && <div className="coverage-note" style={{ marginTop: 10 }}>{turn.result.coverage_note}</div>}
-                </div>
-              )}
-              {turn.result && !turn.result.refused && paper && (
-                <div className="paper-answer">
-                  <p className="rp-prose" style={{ fontSize: 15.5 }}>
-                    {turn.result.claims.map((claim) => (
-                      <span key={claim.id} className="rp-claim">
-                        {claim.text.trim()}{" "}
-                        <sup className="rp-cite" title={`${claim.evidence.section || "passage"} — click to read it`} onClick={() => openCite(claim.id)}>
-                          {claim.evidence.page_start > 0 ? `p.${claim.evidence.page_start}` : claim.evidence.section ? "§" : "·"}
-                        </sup>{" "}
-                      </span>
-                    ))}
-                  </p>
-                  {turn.result.coverage_note && <div className="coverage-note" style={{ marginTop: 12 }}>{turn.result.coverage_note}</div>}
-                </div>
-              )}
-              {turn.result && !turn.result.refused && !paper && (
-                <div className="panel">
-                  <div style={{ padding: "14px 16px 0", display: "flex", alignItems: "center", gap: 10 }}>
-                    <Stamp kind="verified">{turn.result.claims.length} verified claim{turn.result.claims.length === 1 ? "" : "s"}</Stamp>
-                    <span style={{ marginLeft: "auto" }}>
-                      <AddToChat compact item={{ kind: "answer", id: turn.result.answer_id, label: `answer · ${turn.question}` }} />
-                    </span>
-                  </div>
-                  <div className="claim-list" style={{ padding: "8px 8px 10px" }}>
-                    {turn.result.claims.map((claim, n) => (
-                      <div key={claim.id} className="claim" onClick={() => openCite(claim.id)} title="View evidence">
-                        {claim.text}
-                        <sup>[{n + 1}]</sup>
-                        <span className="claim-src">
-                          {claim.evidence.document_title.slice(0, 90)}
-                          {claim.evidence.page_start > 0 && ` · p.${claim.evidence.page_start}`}
-                          {claim.evidence.abstract_only && " · abstract only"}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  {turn.result.coverage_note && (
-                    <div className="coverage-note" style={{ margin: "0 16px 14px" }}>{turn.result.coverage_note}</div>
-                  )}
-                </div>
+              {turn.result?.refused && <Refusal result={turn.result} onAsk={submit} />}
+              {turn.result && !turn.result.refused && (
+                <Answer result={turn.result} question={turn.question}
+                        onCite={openCite} onAsk={submit} paper={paper} />
               )}
               {turn.result && turn.result.technical_context.length > 0 && (
                 <div className="tech-context">
                   <h5>Practitioner signal — separate evidence class, not part of the answer</h5>
                   {turn.result.technical_context.map((hit) => (
                     <div className="tech-hit" key={hit.document_id + hit.snippet.slice(0, 16)}>
-                      <Stamp kind="neutral">{hit.source_type}</Stamp>
                       <span className="t"><strong>{hit.document_title.slice(0, 70)}</strong>{" — "}{hit.snippet.slice(0, 140)}…</span>
                     </div>
                   ))}
@@ -208,12 +433,21 @@ export default function ChatView({
 
       <form className="ask-bar" onSubmit={ask}>
         <div className="ask-row">
-          <input className="input" placeholder={paper ? "Ask this paper anything…" : "What do we know about…"}
-                 value={question} onChange={(e) => setQuestion(e.target.value)} disabled={busy} />
-          <button className="btn btn-accent" disabled={busy || !question.trim()}>
-            {busy ? <Spinner /> : <>Ask <Icon.arrowRight size={14} /></>}
-          </button>
+          <textarea
+            className="input ask-input" rows={1}
+            placeholder={paper ? "Ask this paper anything…" : "Ask a follow-up…"}
+            value={question} onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={onKey} disabled={busy}
+          />
+          {busy ? (
+            <button type="button" className="btn" onClick={stop}>Stop</button>
+          ) : (
+            <button className="btn btn-accent" disabled={!question.trim()}>
+              Ask <Icon.arrowRight size={14} />
+            </button>
+          )}
         </div>
+        <div className="ask-hint">Enter to send · Shift+Enter for a new line</div>
       </form>
 
       {paper && localClaim && (

@@ -74,6 +74,23 @@ function EvidenceRail({
   const [noteSaved, setNoteSaved] = useState(false);
   const headRef = useRef<HTMLDivElement>(null);
 
+  // Ref to target the rail sidebar for click-outside detection
+  const railRef = useRef<HTMLElement>(null);
+
+  // Listener to handle clicks outside the Evidence Rail
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (railRef.current && !railRef.current.contains(event.target as Node)) {
+        onClose();
+      }
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [onClose]);
+
   useEffect(() => {
     let alive = true;
     setDetail(null);
@@ -116,7 +133,7 @@ function EvidenceRail({
   const isScholarly = (t?: string) => t === "paper" || t === "upload" || !t;
 
   return (
-    <aside className="rail" role="complementary" aria-label="Evidence trail">
+    <aside ref={railRef} className="rail" role="complementary" aria-label="Evidence trail">
       <div className="rail-head" ref={headRef}>
         <div className="rail-top">
           <Icon.quote size={14} />
