@@ -13,6 +13,8 @@ import type { Report } from "../types";
 import { Empty, Spinner } from "./ui";
 import { Icon } from "./icons";
 import { SystematicReview } from "./SystematicReview";
+import { ActionDock, ReportAside, type DockTarget } from "./ReportAside";
+import { isGlass } from "../skin";
 import { trackEvent } from "../telemetry";
 
 // ── exports ──────────────────────────────────────────────────────────────
@@ -257,12 +259,16 @@ function ExportSheet({
 // ── shell ────────────────────────────────────────────────────────────────
 
 export default function ReportView({
-  projectId, reportId, sharedSlug,
+  projectId, reportId, sharedSlug, onNavigate,
 }: {
   projectId: string;
   reportId: string | null;
   sharedSlug?: string;
+  onNavigate?: (to: DockTarget) => void;
 }) {
+  const [methodSignal, setMethodSignal] = useState(0);
+  const openMethod = () => setMethodSignal((v) => v + 1);
+  const glass = isGlass();
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState("");
   const [resolving, setResolving] = useState(true);
@@ -353,8 +359,16 @@ export default function ReportView({
             </button>
           )}
         </div>
-        <SystematicReview report={report} />
+        {glass ? (
+          <div className="ga-grid">
+            <SystematicReview report={report} methodSignal={methodSignal} />
+            <ReportAside report={report} onNavigate={shared ? undefined : onNavigate} onMethod={openMethod} />
+          </div>
+        ) : (
+          <SystematicReview report={report} methodSignal={methodSignal} />
+        )}
       </div>
+      {glass && !shared && <ActionDock onNavigate={onNavigate} onMethod={openMethod} />}
       {exportOpen && (
         <ExportSheet
           report={report}

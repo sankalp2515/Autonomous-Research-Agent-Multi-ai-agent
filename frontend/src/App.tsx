@@ -346,7 +346,7 @@ export default function App() {
       case "runs":
         return <RunsView projectId={selected.id} onOpenReport={openReport} initial={pending} onInitialConsumed={() => setPending(null)} />;
       case "report":
-        return <ReportView projectId={selected.id} reportId={reportId} />;
+        return <ReportView projectId={selected.id} reportId={reportId} onNavigate={(v) => go(v)} />;
       case "chat":
         return <ChatView projectId={selected.id} />;
       case "documents":

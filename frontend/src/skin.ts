@@ -28,3 +28,10 @@ export function applySkin(skin: Skin = resolveSkin()): void {
   if (skin === "glass") document.documentElement.dataset.skin = "glass";
   else delete document.documentElement.dataset.skin;
 }
+
+/** True while the glass skin is applied. Components that render glass-only
+ *  structure (ReportAside, ActionDock) read this, so the editorial skin keeps
+ *  exactly the markup it had. */
+export function isGlass(): boolean {
+  return document.documentElement.dataset.skin === "glass";
+}

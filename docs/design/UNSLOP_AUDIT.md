@@ -7,21 +7,21 @@ Checklist: [heydamir/unslop](https://github.com/heydamir/unslop) `SKILL.md`
 ## The conflict, stated first
 
 The brief was "match the reference's glassmorphism, premium, not AI slop".
-unslop names glassmorphism itself as a trend to avoid swapping in ("do not
-swap one trend for another like glass, grain, noise, neon"), and three things
-in the reference image are on its list of signs:
+unslop names glassmorphism itself as a trend to avoid ("do not swap one trend
+for another like glass, grain, noise, neon"), and the reference carries several
+of its signs. A first, restrained version (near-opaque panels, flat ground)
+followed unslop and was rejected as "not glassmorphism, and worse than
+before" — it was. The current version follows the reference and records each
+departure from unslop as a deliberate choice:
 
-| in the reference | unslop sign | what the skin does |
+| in the reference | unslop sign | current skin |
 |---|---|---|
-| pink/blush blurred blobs behind the window | "radial colour washes and blobs behind content" | one warm-neutral linear tone shift (paper → claret paper), no blobs |
-| `PIPELINE`, `EVIDENCE QUALITY`, `RESEARCH CORPUS` | "uppercase labels with wide tracking" | sentence case, near-normal tracking, on all 54 selectors |
-| `0.84 High` score dial, "Claim faithfulness 0.88" | decorative stat / mini chart | not copied; also against CLAUDE.md ("evidence strength is a study count, not a score") |
-| "Verified" pill on the report | badge that overclaims | not copied, and the base kicker was changed (below) |
-
-So the skin takes the reference's **material** (frosted, layered, framed
-window on a warm ground; serif headings; one claret accent; hairlines) and
-leaves its **slop signs**. Whether the glass trend itself is acceptable is a
-taste call that is yours; the skin is one flag away from off.
+| blush / cream light behind the window | "radial colour washes and blobs behind content" | **kept** — glass needs something to refract; four soft radial lights, warm hues only, no violet/blue |
+| the whole app as a frosted window, content on see-through cards | glass as a trend | **kept** — real `backdrop-filter` blur, white specular edges |
+| right-hand summary cards, bottom action dock | — | **kept**, built only from numbers the report already carries |
+| `PIPELINE`, `EVIDENCE QUALITY` labels | uppercase tracked labels | **not copied** — sentence case on all 54 selectors |
+| `0.84 High` evidence-quality dial | decorative stat; also a fabricated number | **not copied** — Veriscope computes no such score; the card shows the real composition (verified / derived / refused / sections grounded) |
+| "Verified" pill on the report | badge that overclaims | **not copied**; base kicker changed to "Systematic review" |
 
 ## Direction (unslop's five lines)
 
@@ -43,7 +43,7 @@ taste call that is yours; the skin is one flag away from off.
 | 6 | Looping motion on non-live things: `.side-agent .pulse` (monitor dot), landing proof dot, `#vhook` cite pulse | `styles.css:1801, 2156, 3716` | open. The run-progress pulses (`.rl-step.active`, `.ra-wave`) are LIVE state and stay |
 | 7 | Hue gradient on avatar and the demo-hook header (`#6b76ea → #3f49b8`, a violet-blue) | `styles.css:1807, 3645, 3689` | open: the violet-blue gradient is the single most recognisable slop sign in the codebase |
 | 8 | Radial wash behind the empty-state glyph | `styles.css:209` | open, minor |
-| 9 | Two-layer translucency could cost contrast | glass skin | checked: reading surfaces are ≥ 72% white over a near-white ground; `prefers-reduced-transparency` and no-`backdrop-filter` browsers get opaque surfaces |
+| 9 | Translucency could cost contrast | glass skin | body text sits on cards at 56–72% white over a light ground; `prefers-reduced-transparency` and browsers without `backdrop-filter` get opaque surfaces |
 | 10 | Transparent sticky top bar let scrolled text collide with the breadcrumb | glass skin | **fixed** (found in the harness, not by the checklist) |
 
 Clean on: hype words (none), exclamation marks (none), gradient text (none),
@@ -60,5 +60,7 @@ changes only the material, not those three surfaces.
 
 - Everyone: build with `VITE_SKIN=editorial`.
 - One browser: open the app once with `?skin=editorial` (remembered).
-- Remove entirely: delete `frontend/src/skins/glass.css` and its two lines in
-  `main.tsx`, or `git revert` the skin commit. The base CSS was not edited.
+- Remove entirely: `git revert` the skin commits, or delete `frontend/src/skins/glass.css`,
+  its import in `main.tsx`, `ReportAside.tsx` and the `isGlass()` branch in
+  `ReportView.tsx`. The base CSS was not edited; with the skin off, the report
+  renders the same markup it had before (no aside, no dock).

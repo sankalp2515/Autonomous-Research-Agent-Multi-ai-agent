@@ -24,7 +24,7 @@
 // Rendering rule unchanged from the rest of the product: this component renders
 // ONLY gate-verified claim rows. It never authors a sentence.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   ComparisonRow, ComparisonTable, DerivedStatement, EvidenceRow, Report,
   RefusedClaim, Synthesis,
@@ -911,9 +911,15 @@ function AtAGlance({
   );
 }
 
-export function SystematicReview({ report }: { report: Report }) {
+export function SystematicReview({ report, methodSignal = 0 }: {
+  report: Report;
+  // Bumped by a control OUTSIDE the review (the glass skin's action dock) to
+  // open the method & audit surface.
+  methodSignal?: number;
+}) {
   const c = report.confidence;
   const [surface, setSurface] = useState<Surface>("read");
+  useEffect(() => { if (methodSignal > 0) setSurface("method"); }, [methodSignal]);
   const { order, num } = useRefs(report);
   const matrix = c.evidence_matrix ?? [];
   const schema = c.evidence_schema;
