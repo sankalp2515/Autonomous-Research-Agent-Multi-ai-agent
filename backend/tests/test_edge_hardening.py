@@ -171,5 +171,11 @@ def test_readiness_is_503_when_a_dependency_is_down(monkeypatch):
 
 @pytest.mark.parametrize("path", ["/readyz", "/health", "/api/health"])
 def test_readiness_routes_exist(path):
+    # Asked of the app, not of `app.routes`: newer FastAPI puts router objects
+    # without a `.path` in that list. A dependency being down here (no DB in
+    # unit tests) is a 503, which still proves the route exists; only a 404
+    # means it does not.
+    from fastapi.testclient import TestClient
+
     from app.main import create_app
-    assert path in {r.path for r in create_app().routes}
+    assert TestClient(create_app()).get(path).status_code != 404
