@@ -52,10 +52,21 @@ def check_production_settings(s: Settings, process: str = "api") -> list[Finding
     # ── identity & access ──────────────────────────────────────────────────
     if s.auth_disabled:
         err("AUTH_DISABLED", "auth is disabled; every caller would share one workspace")
-    if not s.supabase_url:
-        err("SUPABASE_URL", "required to verify access tokens (JWKS)")
-    elif not s.supabase_url.lower().startswith("https://"):
-        err("SUPABASE_URL", "must be https")
+    # Which issuer to trust is a decision, not an inference: locally the
+    # provider is guessed from what is configured; in production a guess that
+    # flips because someone added a variable would swap the trust root silently.
+    if not s.auth_provider:
+        err("AUTH_PROVIDER", "set explicitly to identity_platform (or supabase during "
+            "the cut-over); production does not infer which issuer to trust")
+    if s.resolved_auth_provider == "identity_platform":
+        if not s.identity_platform_project_id:
+            err("IDENTITY_PLATFORM_PROJECT_ID", "required to verify Identity Platform "
+                "tokens (it is their audience and issuer)")
+    else:
+        if not s.supabase_url:
+            err("SUPABASE_URL", "required to verify access tokens (JWKS)")
+        elif not s.supabase_url.lower().startswith("https://"):
+            err("SUPABASE_URL", "must be https")
     if s.supabase_jwt_secret:
         warn("SUPABASE_JWT_SECRET", "set but unused in prod (HS256 is refused); remove it "
              "so a leaked secret cannot be mistaken for a live one")

@@ -28,6 +28,9 @@ def _settings(**over):
         supabase_jwt_audience="authenticated",
         supabase_jwt_issuer="",
         supabase_url="https://proj.supabase.co",
+        resolved_auth_provider="supabase",
+        identity_platform_project_id="",
+        identity_platform_tenant_id="",
     )
     base.update(over)
     return SimpleNamespace(**base)

@@ -312,7 +312,14 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.frontend_tags }}
           cache-from: type=gha
+          # Sign-in values are public (browser key, project id), kept in
+          # repository VARIABLES not secrets; the Supabase pair stays only for
+          # the cut-over and is dropped after it (docs/RUNBOOK.md).
           build-args: |
+            VITE_AUTH_PROVIDER=${{ vars.VITE_AUTH_PROVIDER }}
+            VITE_IDP_API_KEY=${{ vars.VITE_IDP_API_KEY }}
+            VITE_IDP_AUTH_DOMAIN=${{ vars.VITE_IDP_AUTH_DOMAIN }}
+            VITE_IDP_PROJECT_ID=${{ vars.VITE_IDP_PROJECT_ID }}
             VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
             VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
             VITE_SENTRY_DSN=${{ secrets.VITE_SENTRY_DSN }}

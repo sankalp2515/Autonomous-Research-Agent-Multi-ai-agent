@@ -78,8 +78,22 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     app_base_url: str = "http://localhost:8080"
 
-    # Auth / Supabase
+    # Auth. Who issues the sign-in tokens the API verifies:
+    #   identity_platform  Google Cloud Identity Platform (Firebase Auth tokens):
+    #                      iss=https://securetoken.google.com/<project>, aud=<project>,
+    #                      RS256 against Google's public securetoken keys.
+    #   supabase           the previous provider, kept for the cut-over and rollback.
+    # Both issue standard JWTs whose `sub` is the user id every row is owned by;
+    # scripts/migrate_supabase_users.py preserves that id across the switch.
     auth_disabled: bool = True   # dev convenience; refused at boot when app_env=prod
+    # Empty = infer from what is configured (see `resolved_auth_provider`), so a
+    # local Supabase setup keeps working until Identity Platform is configured.
+    # Production must set it explicitly (prod_checks).
+    auth_provider: Literal["identity_platform", "supabase", ""] = ""
+    identity_platform_project_id: str = ""   # usually the GCP project id
+    # Optional: accept only tokens minted for this Identity Platform tenant
+    # (multi-tenancy, e.g. one tenant per institution with its own SAML SSO).
+    identity_platform_tenant_id: str = ""
     supabase_url: str = ""
     # CORS: browser origins allowed to call the API (credentialed). Never "*".
     cors_allow_origins: list[str] = [
@@ -421,6 +435,19 @@ class Settings(BaseSettings):
     # Corpus retention: beyond this many embedded chunks per project, the
     # oldest uncited documents go cold (vectors evicted, rebuildable).
     corpus_max_embedded_chunks: int = 4000
+
+    @property
+    def resolved_auth_provider(self) -> str:
+        """The token issuer the API verifies against. An explicit AUTH_PROVIDER
+        wins; otherwise Identity Platform once its project is configured, else
+        Supabase if that is configured, else Identity Platform (the target)."""
+        if self.auth_provider:
+            return self.auth_provider
+        if self.identity_platform_project_id:
+            return "identity_platform"
+        if self.supabase_url:
+            return "supabase"
+        return "identity_platform"
 
     @property
     def nli_required(self) -> bool:

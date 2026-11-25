@@ -9,7 +9,7 @@ from app.core.prod_checks import check_production_settings, enforce_production_s
 def _good(**over) -> Settings:
     base = dict(
         app_env="prod", auth_disabled=False,
-        supabase_url="https://abc.supabase.co",
+        auth_provider="identity_platform", identity_platform_project_id="veriscope-515119",
         cors_allow_origins=["https://app.veriscope.example"],
         db_auto_create=False,
         database_url="postgresql+asyncpg://veriscope:s3cret@10.0.0.5:5432/veriscope",
@@ -36,8 +36,10 @@ def test_a_correct_production_config_has_no_errors():
 
 @pytest.mark.parametrize("over,setting", [
     ({"auth_disabled": True}, "AUTH_DISABLED"),
-    ({"supabase_url": ""}, "SUPABASE_URL"),
-    ({"supabase_url": "http://abc.supabase.co"}, "SUPABASE_URL"),
+    ({"auth_provider": ""}, "AUTH_PROVIDER"),
+    ({"identity_platform_project_id": ""}, "IDENTITY_PLATFORM_PROJECT_ID"),
+    ({"auth_provider": "supabase", "supabase_url": ""}, "SUPABASE_URL"),
+    ({"auth_provider": "supabase", "supabase_url": "http://abc.supabase.co"}, "SUPABASE_URL"),
     ({"cors_allow_origins": ["*"]}, "CORS_ALLOW_ORIGINS"),
     ({"cors_allow_origins": ["http://localhost:5173"]}, "CORS_ALLOW_ORIGINS"),
     ({"cors_allow_origins": ["http://app.example"]}, "CORS_ALLOW_ORIGINS"),
@@ -83,3 +85,9 @@ def test_free_tier_model_that_may_train_on_uploads_is_flagged():
     findings = check_production_settings(
         _good(openrouter_api_key="k", openrouter_model="x/y:free"))
     assert any(f.setting == "OPENROUTER_MODEL" and f.level == "warning" for f in findings)
+
+
+def test_supabase_remains_a_valid_production_provider_during_the_cut_over():
+    s = _good(auth_provider="supabase", identity_platform_project_id="",
+              supabase_url="https://abc.supabase.co")
+    assert _errors(s) == set()

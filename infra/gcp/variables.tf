@@ -26,9 +26,40 @@ variable "public_base_url" {
   default     = ""
 }
 
-variable "supabase_url" {
-  description = "https://<ref>.supabase.co - Supabase Auth verifies sign-ins (JWKS)."
+# ── sign-in ───────────────────────────────────────────────────────────────
+variable "auth_provider" {
+  description = "Token issuer the API trusts: identity_platform, or supabase to roll back during the cut-over."
   type        = string
+  default     = "identity_platform"
+  validation {
+    condition     = contains(["identity_platform", "supabase"], var.auth_provider)
+    error_message = "auth_provider must be identity_platform or supabase."
+  }
+}
+
+variable "google_oauth_client_id" {
+  description = "OAuth 2.0 web client id for 'Continue with Google' (APIs & Services -> Credentials). Empty = Google sign-in not configured."
+  type        = string
+  default     = ""
+}
+
+variable "google_oauth_client_secret" {
+  description = "Secret of the OAuth client above. Pass via TF_VAR_google_oauth_client_secret, never a committed tfvars."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "extra_authorized_domains" {
+  description = "More hosts allowed to complete sign-in redirects (custom domain, staging)."
+  type        = list(string)
+  default     = []
+}
+
+variable "supabase_url" {
+  description = "https://<ref>.supabase.co - only used when auth_provider = supabase (cut-over / rollback)."
+  type        = string
+  default     = ""
 }
 
 # ── sizing: defaults are the cheapest configuration that runs the product ──

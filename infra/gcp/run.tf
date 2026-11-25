@@ -6,11 +6,15 @@
 
 locals {
   common_env = {
-    APP_ENV             = "prod"
-    AUTH_DISABLED       = "false"
-    DB_AUTO_CREATE      = "false"
-    LOG_FORMAT          = "json"
-    SUPABASE_URL        = var.supabase_url
+    APP_ENV        = "prod"
+    AUTH_DISABLED  = "false"
+    DB_AUTO_CREATE = "false"
+    LOG_FORMAT     = "json"
+    SUPABASE_URL   = var.supabase_url
+
+    AUTH_PROVIDER                = var.auth_provider
+    IDENTITY_PLATFORM_PROJECT_ID = var.project_id
+
     CORS_ALLOW_ORIGINS  = jsonencode([local.web_url])
     APP_BASE_URL        = local.web_url
     TRUST_FORWARDED_FOR = "true"

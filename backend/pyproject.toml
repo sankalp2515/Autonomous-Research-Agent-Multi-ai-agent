@@ -66,6 +66,10 @@ langsmith = [
 ]
 # RAGAS offline second-opinion eval (python -m evals.run_ragas). Judge = Groq
 # (OpenAI-compatible), embeddings = local BGE. Needs the ml extra too.
+# One-off: scripts/migrate_supabase_users.py (Supabase -> Identity Platform).
+migrate = [
+    "firebase-admin>=6.5",
+]
 ragas = [
     "ragas>=0.2",
     "langchain-openai>=0.2",
