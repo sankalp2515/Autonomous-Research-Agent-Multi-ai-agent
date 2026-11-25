@@ -17,7 +17,7 @@ from app.ingestion.chunker import chunk_pages
 from app.ingestion.dedup import find_duplicate, sha256_hex
 from app.ingestion.pdf_parser import parse_pdf
 from app.ml.local_models import embed_texts
-from app.stores.qdrant_store import upsert_chunks
+from app.stores import vector_store
 
 logger = get_logger("ingest")
 
@@ -180,7 +180,7 @@ def context_text(title: str, section: str, text: str) -> str:
 async def _embed_and_index(
     session: AsyncSession, project_id: str, doc: Document, chunk_rows: list[Chunk]
 ) -> None:
-    """Embed in batches and upsert to Qdrant. On embedding failure the
+    """Embed in batches and write the vectors onto the chunk rows. On failure the
     document stays status=indexed-pending-vectors and a re-run repairs it -
     text in Postgres is the durable truth, vectors are rebuildable."""
     batch = 64
@@ -190,10 +190,10 @@ async def _embed_and_index(
             vectors = await embed_texts(
                 [context_text(doc.title, r.section, r.text) for r in rows]
             )
-            await upsert_chunks([
+            await vector_store.upsert_chunks([
                 (r.id, vec, {"project_id": project_id, "document_id": doc.id})
                 for r, vec in zip(rows, vectors)
-            ])
+            ], session=session)
             for r in rows:
                 r.embedded = True
     except Exception:
@@ -206,7 +206,7 @@ async def enforce_corpus_budget(session: AsyncSession, project_id: str) -> int:
     """Tiered retention for small infra (ARCHITECTURE answer to 'we cannot
     store millions of papers'):
 
-    - HOT  : embedded chunks in Qdrant, capped at corpus_max_embedded_chunks
+    - HOT  : chunks carrying a vector, capped at corpus_max_embedded_chunks
     - COLD : text + metadata + verified claims stay in Postgres forever
              (kilobytes per paper); vectors are evicted and rebuildable
              on demand via the reindex job (text is still BM25-searchable)
@@ -226,7 +226,13 @@ async def enforce_corpus_budget(session: AsyncSession, project_id: str) -> int:
     if excess <= 0:
         return 0
 
-    cited_chunk_ids = set((await session.scalars(select(ClaimEvidence.chunk_id))).all())
+    # Scoped to THIS project: the unscoped form read every tenant's evidence
+    # rows on each ingest, which grows with the whole platform, not the project.
+    cited_chunk_ids = set((await session.scalars(
+        select(ClaimEvidence.chunk_id)
+        .join(Chunk, Chunk.id == ClaimEvidence.chunk_id)
+        .where(Chunk.project_id == project_id)
+    )).all())
     candidates = (await session.scalars(
         select(Document).where(Document.project_id == project_id,
                                Document.status == "indexed")
@@ -243,8 +249,7 @@ async def enforce_corpus_budget(session: AsyncSession, project_id: str) -> int:
         )).all()
         if not chunk_rows or any(c.id in cited_chunk_ids for c in chunk_rows):
             continue  # never evict evidence behind verified claims
-        from app.stores.qdrant_store import delete_document
-        await delete_document(doc.id)
+        await vector_store.delete_document(doc.id, session=session)
         for c in chunk_rows:
             c.embedded = False
         doc.meta = {**(doc.meta or {}), "cold": True}
@@ -271,10 +276,10 @@ async def reindex_pending(session: AsyncSession, project_id: str) -> int:
             vectors = await embed_texts(
                 [context_text(title, r.section, r.text) for r in doc_rows]
             )
-            await upsert_chunks([
+            await vector_store.upsert_chunks([
                 (r.id, vec, {"project_id": project_id, "document_id": doc_id})
                 for r, vec in zip(doc_rows, vectors)
-            ])
+            ], session=session)
             await session.execute(
                 update(Chunk).where(Chunk.id.in_([r.id for r in doc_rows]))
                 .values(embedded=True)

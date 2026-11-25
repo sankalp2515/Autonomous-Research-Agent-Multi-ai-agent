@@ -35,6 +35,16 @@ Thumbs.db
 
 # Interview prep — personal, not part of the public project
 docs/*
+# ...except the operational docs, which ARE the project: a reviewer of this
+# repository must be able to read how it is deployed, rolled back and scaled.
+!docs/RUNBOOK.md
+!docs/SCALING.md
+!docs/CICD.md
+!docs/MIGRATIONS.md
+!docs/DOCKER_SERVICES.md
+!docs/EVALUATION.md
+!docs/CALIBRATION.md
+!docs/PRODUCTION_READINESS.md
 demo_claude_v2.html
 demo_codex.html
 demo-landing.html
@@ -48,3 +58,15 @@ veriscope-demo.mp4
 demo_claude.html
 demo-report.html
 CLAUDE.md
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+crash.log
+
+# Eval benchmark data (licence: SciFact CC BY-NC, SYNERGY abstracts not republishable) and outputs
+backend/evals/data/
+backend/evals/out/

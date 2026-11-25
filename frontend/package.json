@@ -12,6 +12,8 @@
     "e2e:report": "playwright show-report"
   },
   "dependencies": {
+    "@firebase/app": "^0.13.2",
+    "@firebase/auth": "^1.13.6",
     "@supabase/supabase-js": "^2.108.1",
     "framer-motion": "^13.0.0",
     "react": "^18.3.1",

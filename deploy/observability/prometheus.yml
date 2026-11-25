@@ -19,6 +19,17 @@ scrape_configs:
         labels:
           service: veriscope-api
 
+  # The WORKER is where runs execute, so the gate, pipeline-node and most LLM
+  # series are emitted there, not in the API. Before the worker had a /metrics
+  # endpoint the trust alert (VeriscopeGateVerifiedFractionLow) only ever saw
+  # the Ask path's claims. 8211 is the worker's host-mapped health port.
+  - job_name: veriscope-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8211", "host.docker.internal:8212", "host.docker.internal:8213"]
+        labels:
+          service: veriscope-worker
+
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]

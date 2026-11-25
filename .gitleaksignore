@@ -1,0 +1,3 @@
+# Fake credential strings in the redaction test (tests/test_secret_redaction.py),
+# committed before they carried an inline gitleaks:allow. Not secrets.
+0e139e6035c7f94eb1f5027d5664aec8495b1574:backend/tests/test_secret_redaction.py:generic-api-key:48

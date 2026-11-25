@@ -16,7 +16,7 @@ jobs:
         working-directory: backend
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg16
         env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: research }
         ports: ["5433:5432"]
         options: >-
@@ -24,19 +24,15 @@ jobs:
       redis:
         image: redis:7-alpine
         ports: ["6380:6379"]
-      qdrant:
-        image: qdrant/qdrant:v1.12.4
-        ports: ["6333:6333"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
-      - run: pip install -e ".[ml]"
+      - run: pip install -e ".[ml,dev]"   # dev: fakeredis isolates the screening benchmark's LLM cache
       - name: Run chat groundedness gate
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
           REDIS_URL: redis://localhost:6380/0
-          QDRANT_URL: http://localhost:6333
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python -m evals.run_evals
@@ -45,7 +41,6 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
           REDIS_URL: redis://localhost:6380/0
-          QDRANT_URL: http://localhost:6333
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python -m evals.run_report_evals
@@ -55,15 +50,49 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
           REDIS_URL: redis://localhost:6380/0
-          QDRANT_URL: http://localhost:6333
         run: python -m evals.calibrate
+
+      # Research-synthesis benchmarks against HUMAN labels (docs/EVALUATION.md).
+      # Informational: a drop is a quality incident for a person to read
+      # (RUNBOOK "the benchmarks moved"), not a threshold to auto-tune against.
+      - name: Fetch benchmark data (SciFact, SYNERGY Hall_2012)
+        continue-on-error: true
+        run: |
+          python -m evals.fetch_data scifact
+          python -m venv /tmp/synergy && /tmp/synergy/bin/pip install -q synergy-dataset
+          /tmp/synergy/bin/python -m evals.fetch_data synergy
+
+      - name: Gate vs SciFact (informational)
+        continue-on-error: true
+        env:
+          ML_NLI_ENABLED: "true"
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
+          REDIS_URL: redis://localhost:6380/0
+        run: python -m evals.scifact_gate --json evals/out/scifact_gate.json
+
+      - name: Screening vs a published review (informational)
+        continue-on-error: true
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
+          REDIS_URL: redis://localhost:6380/0
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python -m evals.screening_bench --json evals/out/screening_hall2012.json
+
+      - name: Upload benchmark outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthesis-benchmarks
+          path: backend/evals/out/
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: RAGAS second-opinion (informational)
         continue-on-error: true   # LLM-judge-backed: cross-check, not a hard gate
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/research
           REDIS_URL: redis://localhost:6380/0
-          QDRANT_URL: http://localhost:6333
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |

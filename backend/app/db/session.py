@@ -58,7 +58,9 @@ async def init_db(*, attempts: int = 10, delay: float = 2.0) -> None:
         try:
             async with engine.begin() as conn:
                 if settings.db_auto_create:
+                    await _ensure_extensions(conn)
                     await conn.run_sync(Base.metadata.create_all)
+                    await _ensure_dev_columns(conn)
                 else:
                     from sqlalchemy import text
                     await conn.execute(text("SELECT 1"))  # connectivity only
@@ -91,6 +93,37 @@ _HOT_INDEXES = (
     # report claim fan-in: report load batches on report_id.
     'CREATE INDEX IF NOT EXISTS ix_claims_report ON claims (report_id)',
 )
+
+
+async def _ensure_extensions(conn) -> None:
+    """Dev bootstrap only (db_auto_create): the chunk table's vector column needs
+    pgvector before create_all can build it. Production gets this from Alembic
+    (0001/0007), never from the app at boot."""
+    from sqlalchemy import text
+    if conn.dialect.name == "postgresql":
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+
+
+# Columns added after a dev database was first created. create_all never ALTERs
+# an existing table, so a laptop database that predates a column would boot and
+# then fail on first use. Mirrors the Alembic revisions that add them.
+_DEV_COLUMNS = (
+    "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding vector(384)",
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS launch_params JSON NOT NULL DEFAULT '{}'",
+)
+
+
+async def _ensure_dev_columns(conn) -> None:
+    from sqlalchemy import text
+    if conn.dialect.name != "postgresql":
+        return
+    for stmt in _DEV_COLUMNS:
+        await conn.execute(text(stmt))
+    if get_settings().vector_backend == "pgvector":
+        # Keep `embedded` honest: on a database whose vectors are still in
+        # Qdrant, no chunk has a pgvector vector yet. Same step as 0007.
+        await conn.execute(text(
+            "UPDATE chunks SET embedded = false WHERE embedding IS NULL AND embedded"))
 
 
 async def _ensure_indexes(conn) -> None:

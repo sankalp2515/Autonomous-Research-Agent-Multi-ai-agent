@@ -25,7 +25,7 @@ export default function Login() {
         await signIn(email.trim(), password);
       } else if (mode === "up") {
         await signUp(email.trim(), password);
-        // Supabase does not reveal whether an address already exists, so we
+        // Neither provider reveals whether an address already exists, so we
         // phrase this to be correct in both cases rather than promising a new
         // account was created.
         setMsg("Check your email to confirm your address, then sign in. If you already have an account, sign in instead.");
@@ -122,10 +122,23 @@ export default function Login() {
   );
 }
 
-// Map the handful of raw Supabase error strings users actually hit to plain
-// language. Anything unrecognized passes through unchanged.
+// Map the raw provider errors users actually hit (Supabase messages, Identity
+// Platform "auth/..." codes) to plain language. Anything unrecognized passes
+// through unchanged.
 function friendly(raw: string): string {
   const s = raw.toLowerCase();
+  if (s.includes("auth/invalid-credential") || s.includes("auth/wrong-password")
+      || s.includes("auth/user-not-found") || s.includes("auth/invalid-login-credentials"))
+    return "That email or password doesn’t match. Try again, or reset your password.";
+  if (s.includes("auth/too-many-requests")) return "Too many attempts. Wait a minute and try again.";
+  if (s.includes("auth/weak-password")) return "Password must be at least 6 characters.";
+  if (s.includes("auth/invalid-email")) return "That doesn’t look like an email address.";
+  if (s.includes("auth/user-disabled")) return "This account has been disabled. Contact support if that’s unexpected.";
+  if (s.includes("auth/popup-closed-by-user") || s.includes("auth/cancelled-popup-request"))
+    return "The Google window closed before sign-in finished. Try again.";
+  if (s.includes("auth/network-request-failed")) return "Couldn’t reach the sign-in service. Check your connection and try again.";
+  if (s.includes("auth/unauthorized-domain"))
+    return "This address isn’t authorized for sign-in yet. Add it under Identity Platform → Settings → Authorized domains.";
   if (s.includes("invalid login")) return "That email or password doesn’t match. Try again, or reset your password.";
   if (s.includes("email not confirmed")) return "Please confirm your email first — check your inbox for the link.";
   if (s.includes("rate limit") || s.includes("too many")) return "Too many attempts. Wait a minute and try again.";

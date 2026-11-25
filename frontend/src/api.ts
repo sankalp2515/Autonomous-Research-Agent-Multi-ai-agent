@@ -2,7 +2,7 @@ import type {
   ChatResult, Doc, EvidenceDetail, GraphData, Project, RefindHit, Report,
   Run, RunStatus,
 } from "./types";
-import { getToken } from "./auth";
+import { getFreshToken, getToken } from "./auth";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -15,7 +15,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body && !(init.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
-  const token = getToken();
+  const token = await getFreshToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const resp = await fetch(path, {
     ...init,
@@ -114,7 +114,7 @@ export const api = {
     (async () => {
       try {
         const headers: Record<string, string> = {};
-        const token = getToken();
+        const token = await getFreshToken();
         if (token) headers["Authorization"] = `Bearer ${token}`;
         const resp = await fetch(`/api/status/${runId}/stream`, { headers, signal: ctrl.signal });
         if (!resp.body) return;
@@ -237,7 +237,7 @@ export const api = {
       let settled = false;
       try {
         const headers: Record<string, string> = { "Content-Type": "application/json" };
-        const token = getToken();
+        const token = await getFreshToken();
         if (token) headers["Authorization"] = `Bearer ${token}`;
         const resp = await fetch("/api/chat/stream", {
           method: "POST", headers, signal: ctrl.signal,

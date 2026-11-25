@@ -15,7 +15,7 @@ embeddings, matching what the app itself uses.
 
 Install:  pip install -e ".[ml,ragas]"
 Run:      GROQ_API_KEY=... python -m evals.run_ragas
-Needs:    docker-compose up (postgres/redis/qdrant), same as run_evals.py.
+Needs:    docker compose up (postgres+pgvector/redis), same as run_evals.py.
 Informational (soft gate): prints scores; exits 0 unless a score falls below a
 loose floor, so a flaky judge never blocks a release.
 """
@@ -31,7 +31,7 @@ from app.db.models import Project
 from app.db.session import init_db, session_scope
 from app.ingestion.pipeline import ingest_text_document
 from app.services.grounded import grounded_chat
-from app.stores.qdrant_store import ensure_collection
+from app.stores.vector_store import ensure_ready as ensure_collection
 
 logger = get_logger("ragas")
 

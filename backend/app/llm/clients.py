@@ -44,6 +44,9 @@ class ProviderSpec:
 
 
 PROVIDERS: dict[str, ProviderSpec] = {
+    # Vertex has no API key; its "key" slot is the project id, which is what
+    # makes it configured. Auth happens per call with ADC (see _vertex_token).
+    "vertex": ProviderSpec("vertex", "", "vertex_project", "vertex_model", "vertex_rpm"),
     "gemini": ProviderSpec("gemini", "", "gemini_api_key", "gemini_model", "gemini_rpm"),
     "groq": ProviderSpec(
         "groq", "https://api.groq.com/openai/v1/chat/completions",
@@ -97,6 +100,37 @@ def provider_rpm(name: str) -> int:
     return int(getattr(get_settings(), spec.rpm_setting))
 
 
+def _gemini_answer_text(data: dict, provider: str, max_tokens: int) -> str:
+    """The answer text of a generateContent response (AI Studio and Vertex
+    share the schema)."""
+    try:
+        candidate = data["candidates"][0]
+        parts = candidate["content"]["parts"]
+    except (KeyError, IndexError) as exc:
+        raise ExternalServiceError(
+            f"{provider} returned no candidates",
+            detail={"finish": str(data.get("candidates", [{}])[:1])[:300]},
+        ) from exc
+    # ONE ANSWER CAN ARRIVE IN SEVERAL PARTS. This read `parts[0]` only, and
+    # Gemini splits a single response across parts with finishReason=STOP
+    # (measured: [4946, 37] and [93, 1887] characters on two screening calls).
+    # Everything after the first part was dropped, the JSON no longer parsed,
+    # and the repair rebuilt it from a fragment — silently losing the tail of
+    # every split response at every step that uses Gemini. Thought-summary
+    # parts are not the answer and are skipped.
+    text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    if not text:
+        raise ExternalServiceError(f"{provider} returned an empty answer",
+                                   detail={"finish": candidate.get("finishReason")})
+    if candidate.get("finishReason") == "MAX_TOKENS":
+        # Truncated by OUR output cap. The caller's parse/repair path sees
+        # incomplete output; say so in the log rather than let it look like a
+        # model formatting error.
+        logger.warning(f"{provider} output hit max_tokens; response is truncated",
+                       extra={"max_tokens": max_tokens, "chars": len(text)})
+    return text
+
+
 @retry_llm
 async def _call_gemini(api_key: str, prompt: str, *, system: str,
                        temperature: float, max_tokens: int) -> LLMResult:
@@ -111,25 +145,75 @@ async def _call_gemini(api_key: str, prompt: str, *, system: str,
     }
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
+    # The key travels in a HEADER, never the query string. It used to be
+    # `params={"key": ...}`, which put it in the request URL — and httpx puts the
+    # URL in every HTTPStatusError message, which tenacity's retry logger and
+    # the router's failover warning both print. Every 503 from Gemini wrote a
+    # live API key to the log stream (and from there to Cloud Logging).
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(url, json=body, params={"key": api_key})
+        resp = await client.post(url, json=body, headers={"x-goog-api-key": api_key})
     if resp.status_code == 429:
         raise RateLimitedError("gemini rate limited")
     resp.raise_for_status()
     data = resp.json()
-    try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError) as exc:
-        raise ExternalServiceError(
-            "gemini returned no candidates",
-            detail={"finish": str(data.get("candidates", [{}])[:1])[:300]},
-        ) from exc
+    text = _gemini_answer_text(data, "gemini", max_tokens)
     usage = data.get("usageMetadata", {})
     t_in = usage.get("promptTokenCount", 0)
     t_out = usage.get("candidatesTokenCount", 0)
     LLM_TOKENS.labels("gemini", "in").inc(t_in)
     LLM_TOKENS.labels("gemini", "out").inc(t_out)
     return LLMResult(text, "gemini", t_in, t_out)
+
+
+_vertex_creds = None
+
+
+def _vertex_token_sync() -> str:
+    """ADC access token, refreshed when near expiry. google-auth is synchronous
+    (it does network I/O on refresh), so callers run this in a thread."""
+    global _vertex_creds
+    import google.auth
+    import google.auth.transport.requests
+    if _vertex_creds is None:
+        _vertex_creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    if not _vertex_creds.valid:
+        _vertex_creds.refresh(google.auth.transport.requests.Request())
+    return _vertex_creds.token
+
+
+@retry_llm
+async def _call_vertex(project: str, prompt: str, *, system: str,
+                       temperature: float, max_tokens: int) -> LLMResult:
+    """Gemini on Vertex AI. Same request/response schema as the AI Studio API,
+    different endpoint and auth - so the parsing below mirrors _call_gemini."""
+    import asyncio
+    settings = get_settings()
+    loc = settings.vertex_location
+    host = "aiplatform.googleapis.com" if loc == "global" else f"{loc}-aiplatform.googleapis.com"
+    url = (f"https://{host}/v1/projects/{project}/locations/{loc}/publishers/google/"
+           f"models/{settings.vertex_model}:generateContent")
+    body: dict[str, Any] = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+    }
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    token = await asyncio.to_thread(_vertex_token_sync)
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.post(url, json=body,
+                                 headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code == 429:
+        raise RateLimitedError("vertex rate limited")
+    resp.raise_for_status()
+    data = resp.json()
+    text = _gemini_answer_text(data, "vertex", max_tokens)
+    usage = data.get("usageMetadata", {})
+    t_in = usage.get("promptTokenCount", 0)
+    t_out = usage.get("candidatesTokenCount", 0)
+    LLM_TOKENS.labels("vertex", "in").inc(t_in)
+    LLM_TOKENS.labels("vertex", "out").inc(t_out)
+    return LLMResult(text, "vertex", t_in, t_out)
 
 
 @retry_llm
@@ -156,12 +240,21 @@ async def _call_openai_compatible(spec: ProviderSpec, api_key: str, prompt: str,
     resp.raise_for_status()
     data = resp.json()
     try:
-        text = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        text = choice["message"]["content"]
     except (KeyError, IndexError) as exc:
         raise ExternalServiceError(
             f"{spec.name} returned no choices",
             detail={"body": str(data)[:300]},
         ) from exc
+    if not text:
+        # A null/empty content (refusal, tool-call-only, filtered) is not an
+        # answer; failing over beats handing "" to a JSON parser.
+        raise ExternalServiceError(f"{spec.name} returned an empty answer",
+                                   detail={"finish": choice.get("finish_reason")})
+    if choice.get("finish_reason") == "length":
+        logger.warning(f"{spec.name} output hit max_tokens; response is truncated",
+                       extra={"max_tokens": max_tokens, "chars": len(text)})
     usage = data.get("usage") or {}
     t_in = usage.get("prompt_tokens", 0)
     t_out = usage.get("completion_tokens", 0)
@@ -179,6 +272,9 @@ async def call_provider(name: str, prompt: str, *, system: str = "",
     if not keys:
         raise ExternalServiceError(f"{name} API key not configured")
     api_key = keys[key_index % len(keys)]
+    if name == "vertex":
+        return await _call_vertex(api_key, prompt, system=system,
+                                  temperature=temperature, max_tokens=max_tokens)
     if name == "gemini":
         return await _call_gemini(api_key, prompt, system=system,
                                   temperature=temperature, max_tokens=max_tokens)

@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # Backpressure — shed load gracefully instead of melting the worker pool.
     max_concurrent_runs_per_project: int = 2   # per-project admission cap
     max_queue_depth: int = 200                 # global shed threshold (503 above this)
+    # SIGTERM grace for an in-flight job before it is handed back to the queue
+    # (uncounted). Keep it under the platform's kill window: Cloud Run sends
+    # SIGKILL 10s after SIGTERM, Kubernetes after terminationGracePeriodSeconds.
+    worker_shutdown_grace_seconds: float = 8.0
 
     # Per-caller API rate limit (requests/min, fixed window). Coarse DoS/abuse
     # guard applied in middleware; keyed on the auth token when present, else IP.
@@ -74,8 +78,22 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     app_base_url: str = "http://localhost:8080"
 
-    # Auth / Supabase
+    # Auth. Who issues the sign-in tokens the API verifies:
+    #   identity_platform  Google Cloud Identity Platform (Firebase Auth tokens):
+    #                      iss=https://securetoken.google.com/<project>, aud=<project>,
+    #                      RS256 against Google's public securetoken keys.
+    #   supabase           the previous provider, kept for the cut-over and rollback.
+    # Both issue standard JWTs whose `sub` is the user id every row is owned by;
+    # scripts/migrate_supabase_users.py preserves that id across the switch.
     auth_disabled: bool = True   # dev convenience; refused at boot when app_env=prod
+    # Empty = infer from what is configured (see `resolved_auth_provider`), so a
+    # local Supabase setup keeps working until Identity Platform is configured.
+    # Production must set it explicitly (prod_checks).
+    auth_provider: Literal["identity_platform", "supabase", ""] = ""
+    identity_platform_project_id: str = ""   # usually the GCP project id
+    # Optional: accept only tokens minted for this Identity Platform tenant
+    # (multi-tenancy, e.g. one tenant per institution with its own SAML SSO).
+    identity_platform_tenant_id: str = ""
     supabase_url: str = ""
     # CORS: browser origins allowed to call the API (credentialed). Never "*".
     cors_allow_origins: list[str] = [
@@ -87,6 +105,10 @@ class Settings(BaseSettings):
     # Trust X-Forwarded-For for the client IP (enable ONLY behind a proxy you
     # control, or clients can spoof their rate-limit identity).
     trust_forwarded_for: bool = False
+    # How many proxies APPEND to X-Forwarded-For in front of the app. Cloud Run
+    # alone: 1. External HTTPS load balancer in front of Cloud Run: 2. The
+    # client IP is the entry this many places from the right.
+    trusted_proxy_hops: int = 1
     # Tighter per-subject budget for the expensive pipeline endpoint.
     pipeline_rate_limit_per_min: int = 10
     supabase_publishable_key: str = ""   # frontend sign-in key (not a secret)
@@ -99,8 +121,26 @@ class Settings(BaseSettings):
 
     # Stores
     redis_url: str = "redis://localhost:6379/0"
+    # Dense vectors. pgvector (default) stores them on chunks.embedding in the
+    # system of record; "qdrant" is the previous store, kept for one release so
+    # a bad cut-over is a config flip. See app/stores/vector_store.py.
+    vector_backend: Literal["pgvector", "qdrant"] = "pgvector"
+    # Mirror writes to the store that is NOT being read, during the migration
+    # window only, so flipping vector_backend back needs no backfill.
+    vector_dual_write: bool = False
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "chunks"
+
+    # Vertex AI (paid Gemini on Google Cloud). Set VERTEX_PROJECT to enable; it
+    # then LEADS every routing chain. No API key: auth is Application Default
+    # Credentials - the Cloud Run service account in production, `gcloud auth
+    # application-default login` on a laptop. Paid Vertex traffic is not used
+    # for model training, unlike the free AI Studio tier, which matters because
+    # prompts carry user-uploaded papers.
+    vertex_project: str = ""
+    vertex_location: str = "global"
+    vertex_model: str = "gemini-3.5-flash"
+    vertex_rpm: int = 300
 
     # LLM providers (free tier)
     gemini_api_key: str = ""
@@ -307,7 +347,14 @@ class Settings(BaseSettings):
     # constant rather than of how long the paper was, so the timeout below
     # means "the tier is wedged", not "this paper had many chunks".
     inference_embed_batch: int = 48
+    # Parse ceiling for any PDF, including ones fetched server-side from arXiv.
     ingest_max_pdf_mb: int = 50
+    # Ceiling for a PDF UPLOADED over HTTP. 30, not 50: Cloud Run's front end
+    # rejects HTTP/1.1 request bodies over 32 MiB before the app sees them, so a
+    # larger limit only promised an upload the platform would refuse. The web
+    # tier's client_max_body_size (31m) and the API's BodySizeLimit derive from
+    # this. Larger papers arrive by arXiv/DOI fetch or, later, a signed upload.
+    upload_max_pdf_mb: int = 30
     # In-flight papers during ingest. Safe to raise above the old 2: all local
     # embedding is serialized behind a single _infer_lock (ml/local_models.py),
     # so extra concurrency only overlaps the I/O-bound download + PDF parse of
@@ -320,13 +367,15 @@ class Settings(BaseSettings):
     ingest_download_concurrency: int = 10
     # Device-local paper library (PDF + parsed markdown). Checked before any
     # download so a paper is fetched from the network at most once.
-    # Next phase: swap this for S3 by reimplementing app/stores/blob_store.py.
     library_enabled: bool = True
     library_dir: str = "data/library"
     # Blob backend for the paper library. "local" = filesystem (single node);
-    # "s3" = shared object store (S3 / MinIO / R2) so multiple API+worker
-    # replicas share one library — required for horizontal scaling.
-    blob_backend: Literal["local", "s3"] = "local"
+    # "gcs" = Google Cloud Storage via Application Default Credentials (no key
+    # file: the Cloud Run service account is the identity); "s3" = S3 / MinIO /
+    # R2. A shared backend is required for more than one replica.
+    blob_backend: Literal["local", "gcs", "s3"] = "local"
+    gcs_bucket: str = ""
+    gcs_prefix: str = "library"
     s3_bucket: str = ""
     s3_prefix: str = "library"
     s3_endpoint_url: str = ""            # set for MinIO/R2; empty = real AWS S3
@@ -386,6 +435,19 @@ class Settings(BaseSettings):
     # Corpus retention: beyond this many embedded chunks per project, the
     # oldest uncited documents go cold (vectors evicted, rebuildable).
     corpus_max_embedded_chunks: int = 4000
+
+    @property
+    def resolved_auth_provider(self) -> str:
+        """The token issuer the API verifies against. An explicit AUTH_PROVIDER
+        wins; otherwise Identity Platform once its project is configured, else
+        Supabase if that is configured, else Identity Platform (the target)."""
+        if self.auth_provider:
+            return self.auth_provider
+        if self.identity_platform_project_id:
+            return "identity_platform"
+        if self.supabase_url:
+            return "supabase"
+        return "identity_platform"
 
     @property
     def nli_required(self) -> bool:

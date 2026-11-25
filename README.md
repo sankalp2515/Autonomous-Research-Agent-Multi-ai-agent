@@ -50,7 +50,7 @@ Most AI research tools fabricate — plausible summaries with citations that are
 
 ```bash
 cp .env.example backend/.env               # add free LLM keys (open demo, no auth)
-docker compose --profile app up --build    # UI + API + worker + Postgres/Redis/Qdrant
+docker compose --profile app up --build    # UI + API + worker + Postgres(pgvector)/Redis
 # → open http://localhost:8080
 ```
 
@@ -134,15 +134,16 @@ of memory, and the platform underneath.
 │   clarify→plan→evidence_schema→research→extract_evidence→     │
 │   report_architect→draft_sections+GATE⇄replan→assemble→graph  │
 └──────────────────────────────────────────────────────────────┘
-   │ Postgres (truth)   │ Qdrant (vectors)   │ Redis (queue/cache)
+   │ Postgres + pgvector (truth, text AND vectors)   │ Redis (queue/cache)
 ```
 
 **The one law: agents propose, deterministic verifiers dispose.** LLMs run only inside a bounded agent layer; the verification gate sits between them and the user and **blocks** — it never merely observes.
 
 - **Verification gate over a smarter model** — trust is enforced structurally (quote-match + NLI + citation resolution), so it doesn't depend on model quality. That's what makes it viable on **free-tier LLMs** (Gemini + Groq, with DeepSeek/OpenRouter fallbacks), complexity-routed with throttling, caching, and a hard per-call timeout.
-- **Postgres is the system of record; Qdrant + Redis are rebuildable.** Text, claims and quotes persist forever (KBs/paper); vectors are a disposable cache. Tiered retention + live scholarly APIs as the global index answer "we can't store millions of papers."
+- **Postgres is the system of record, vectors included; Redis is rebuildable.** Chunk vectors live on the chunk row (pgvector), so text and vector cannot drift, a failed ingest rolls both back, and tenancy is one SQL predicate. Retrieval is an exact cosine scan inside one project — milliseconds at a few thousand chunks, and it never misses a neighbour. Tiered retention + live scholarly APIs as the global index answer "we can't store millions of papers."
 - **Evidence-class separation is structural** — mixing a peer-reviewed finding with a blog post launders the blog's claim into undeserved credibility; retrieval, drafting and the UI keep the classes apart by construction.
-- **Crash-safe worker** — atomic job claim, startup orphan-recovery, a single inference lock (concurrent Torch calls segfault), checkpointed resumable runs.
+- **Crash-safe worker** — leased job claims with a reaper (a dead worker's job is requeued by the survivors within two minutes), a dead-letter queue, graceful SIGTERM hand-back, run reconciliation from the database, a single inference lock (concurrent Torch calls segfault), checkpointed resumable runs.
+- **Production-guarded** — `APP_ENV=prod` refuses to boot on any development setting (auth off, localhost stores, open metrics, local blob storage...) and lists every problem at once. Liveness and readiness are separate probes. See [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) and [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ## Tech stack
 
@@ -151,11 +152,11 @@ of memory, and the platform underneath.
 | API | FastAPI (async), Pydantic v2 |
 | Orchestration | LangGraph |
 | System of record | PostgreSQL 16 (SQLAlchemy async) — local or Supabase |
-| Vectors | Qdrant · **Queue/cache** Redis |
+| Vectors | pgvector (on the chunk row) · **Queue/cache** Redis |
 | PDF parsing | PyMuPDF4LLM |
 | Retrieval | rank-bm25 + dense (`bge-small`) + RRF + cross-encoder rerank |
 | Verification | exact quote match + DeBERTa-v3 NLI + CrossRef/OpenAlex/arXiv |
-| LLMs | Gemini · Groq · DeepSeek · OpenRouter (free tiers) |
+| LLMs | Vertex AI Gemini (production, service-account auth) · Gemini · Groq · OpenRouter (free-tier fallbacks) |
 | Observability | Prometheus · structured JSON logs · optional Sentry + Langfuse |
 | Frontend | React 18 + TypeScript + Vite |
 
@@ -164,7 +165,7 @@ of memory, and the platform underneath.
 **Prereqs:** Docker, Python 3.12, Node 18+, and at least one free LLM key ([Gemini](https://aistudio.google.com/apikey), [Groq](https://console.groq.com)).
 
 ```bash
-docker compose up -d                       # Postgres :5433, Redis :6380, Qdrant :6333
+docker compose up -d                       # Postgres+pgvector :5433, Redis :6380
 cp .env.example backend/.env               # add a key; set AUTH_DISABLED=true for local
 
 cd backend
@@ -187,7 +188,7 @@ and proxying `/api` to the backend), so the entire app lives at a single URL:
 
 ```bash
 cp .env.example backend/.env            # add your free LLM keys (see below)
-docker compose --profile app up --build # UI + API + worker + Postgres/Redis/Qdrant
+docker compose --profile app up --build # UI + API + worker + Postgres(pgvector)/Redis
 # → open http://localhost:8080
 ```
 
@@ -204,11 +205,11 @@ default.
 
 ## API
 
-Base path `/api` (`/health`, `/metrics` unprefixed). Interactive docs at `http://localhost:8210/docs`.
+Base path `/api` (`/livez`, `/readyz`, `/health`, `/metrics` unprefixed). Interactive docs at `http://localhost:8210/docs`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` · `/metrics` | Deep health (PG/Redis/Qdrant) · Prometheus |
+| GET | `/livez` · `/readyz` · `/metrics` | Liveness (no deps) · readiness, 503 if Postgres/Redis/pgvector/storage is down · Prometheus |
 | POST | `/api/clarify` | Intent guard + clarifying questions before a run |
 | POST | `/api/pipeline` | Start a deep-research run |
 | GET | `/api/status/{id}` · `/api/status/{id}/stream` | Run status · **live SSE stream** |

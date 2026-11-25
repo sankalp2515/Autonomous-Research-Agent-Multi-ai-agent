@@ -1,0 +1,41 @@
+{
+  "name": "Hall_2012 (SYNERGY)",
+  "review": "Hall T, Beecham S, Bowes D, Gray D, Counsell S. A Systematic Literature Review on Fault Prediction Performance in Software Engineering. IEEE Transactions on Software Engineering 38(6):1276-1304, 2012. doi:10.1109/TSE.2011.103",
+  "labels": "SYNERGY v1.0 (doi:10.34894/HE6NAQ, CC0), dataset Hall_2012: 8,793 records, 104 label_included. Collected by Yu et al., doi:10.1007/s10664-017-9587-0.",
+  "fetch": "python -m evals.fetch_data synergy  (needs `pip install synergy-dataset`). Writes evals/data/synergy/Hall_2012.csv; abstracts are reconstructed from OpenAlex inverted indexes and must not be republished in plaintext, so evals/data/ is gitignored.",
+  "records": "../data/synergy/Hall_2012.csv",
+  "question": "Which empirical studies build and evaluate models that predict faults in units of a software system?",
+  "objective": "Identify empirical studies, published January 2000 to December 2010, that predict faults in units of a software system, with faults in code as the dependent variable.",
+  "field": "software engineering",
+  "criteria": [
+    {
+      "name": "Empirical study",
+      "question": "Is the paper an empirical study?"
+    },
+    {
+      "name": "Predicts faults in software units",
+      "question": "Is it focused on predicting faults in units of a software system?"
+    },
+    {
+      "name": "Faults in code are the output",
+      "question": "Are faults in code the main output (dependent variable)?"
+    },
+    {
+      "name": "Not an excluded topic",
+      "question": "Is it NOT focused on testing, fault injection, inspections, reliability modelling, aspects, effort estimation, debugging, faults relating to memory leakage, nano-computing or fault tolerance?"
+    },
+    {
+      "name": "Not fault detection or localisation",
+      "question": "Is it NOT about the detection or localisation of existing individual known faults?"
+    },
+    {
+      "name": "Published 2000-2010",
+      "question": "Was it published between January 2000 and December 2010?"
+    },
+    {
+      "name": "English journal or conference paper",
+      "question": "Is it reported in a paper published in English as a journal paper or in conference proceedings?"
+    }
+  ],
+  "criteria_source": "Hall et al. 2012, Section 2.2 and Table 2 (inclusion/exclusion criteria) and Section 2.3 (publication window), applied as written apart from being phrased as questions. The review's de-duplication rule (keep the most comprehensive of repeated studies) is not applied: it needs the other candidates, which a per-abstract screen does not see."
+}

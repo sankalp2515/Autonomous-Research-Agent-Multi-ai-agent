@@ -26,19 +26,27 @@ from app.llm import clients, router
 # ── The chain ───────────────────────────────────────────────────────────
 
 def test_every_step_uses_the_same_order():
-    expected = ["gemini", "openrouter", "groq"]
+    expected = ["vertex", "gemini", "openrouter", "groq"]
     for step, chain in router.ROUTING.items():
         assert chain == expected, f"step {step!r} diverged from the chain"
     assert router._DEFAULT_CHAIN == expected
 
 
-def test_gemini_leads_and_groq_is_the_last_resort():
-    """The two ends carry the intent: the provider being scaled with keys goes
-    first, the fallback that must still answer when the others are throttled
-    goes last."""
+def test_paid_vertex_leads_then_gemini_and_groq_is_the_last_resort():
+    """The ends carry the intent: paid Vertex first when configured (skipped
+    when VERTEX_PROJECT is unset, which leaves gemini leading the free fleet),
+    the fallback that must still answer when the others are throttled last."""
     for chain in router.ROUTING.values():
-        assert chain[0] == "gemini"
+        assert chain[:2] == ["vertex", "gemini"]
         assert chain[-1] == "groq"
+
+
+def test_vertex_is_skipped_unless_a_project_is_configured(monkeypatch):
+    monkeypatch.setattr(clients, "get_settings", lambda: Settings(_env_file=None))
+    assert not clients.provider_configured("vertex")
+    monkeypatch.setattr(clients, "get_settings",
+                        lambda: Settings(_env_file=None, vertex_project="veriscope-515119"))
+    assert clients.provider_keys("vertex") == ["veriscope-515119"]
 
 
 def test_failing_providers_are_out_of_the_rotation_but_not_deleted():

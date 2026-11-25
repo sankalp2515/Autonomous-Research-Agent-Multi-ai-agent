@@ -8,6 +8,7 @@ grep reconstructs the full story of one request.
 
 import json
 import logging
+import re
 import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -24,8 +25,44 @@ _RESERVED = {
 }
 
 
+# ── Secret redaction (defence in depth) ───────────────────────────────────
+# The root cause of the one real leak (Gemini's key in the request URL, printed
+# by every retry warning) is fixed at the call site. This is the backstop for
+# the next one: a credential that reaches a log line through an exception
+# message, a third-party logger, or a URL someone formats into `extra`. It runs
+# on the FINAL formatted line, so message, extras and tracebacks are all
+# covered, and it never raises — a redaction bug must not cost a log line.
+_SECRET_PATTERNS = (
+    # ?key=… &api_key=… &access_token=… in any URL
+    (re.compile(r"(?i)([?&](?:key|api[_-]?key|apikey|access_token|token|"
+                r"client_secret|sig|signature)=)[^&\s'\"<>)]+"), r"\1[REDACTED]"),
+    # Authorization: Bearer … / "authorization": "Bearer …"
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
+    # x-goog-api-key / x-api-key header values echoed into a message
+    (re.compile(r"(?i)((?:x-goog-api-key|x-api-key|api-key)['\"]?\s*[:=]\s*['\"]?)"
+                r"[A-Za-z0-9._-]{8,}"), r"\1[REDACTED]"),
+    # Google API key shapes, wherever they appear
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[REDACTED]"),
+    (re.compile(r"\bAQ\.[0-9A-Za-z_-]{20,}"), "[REDACTED]"),
+    # OpenAI / Anthropic / Groq / OpenRouter style secret keys
+    (re.compile(r"\b(?:sk|gsk|sk-or|sk-ant)-[A-Za-z0-9_-]{16,}"), "[REDACTED]"),
+)
+
+
+def redact(text: str) -> str:
+    try:
+        for pattern, repl in _SECRET_PATTERNS:
+            text = pattern.sub(repl, text)
+    except Exception:
+        pass
+    return text
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        return redact(self._format(record))
+
+    def _format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "level": record.levelname,
@@ -44,6 +81,9 @@ class JsonFormatter(logging.Formatter):
 
 class ConsoleFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        return redact(self._format(record))
+
+    def _format(self, record: logging.LogRecord) -> str:
         extras = " ".join(
             f"{k}={v}" for k, v in record.__dict__.items()
             if k not in _RESERVED and not k.startswith("_")

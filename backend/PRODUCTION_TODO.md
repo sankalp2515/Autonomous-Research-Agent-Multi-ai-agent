@@ -1,5 +1,9 @@
 # Veriscope Backend — Production-Readiness TODO
 
+> **Superseded as the master list by [docs/PRODUCTION_READINESS.md](../docs/PRODUCTION_READINESS.md)**
+> (2026-11-19 audit: 41 fixes, 9 launch blockers, the open items below included).
+> B2 and B4 here are still open there as L6 and L3.
+
 Derived from the backend audit (Phase 2 gap analysis + Phase 3 action list).
 Ordered by the product's own priority rule:
 **silently wrong/untrustworthy > breaks under usage > breaks under scale > polish.**
@@ -90,7 +94,7 @@ Type: **[Fix now]** actionable directly · **[Decision]** needs a call from the 
   Files: `app/llm/router.py`
 
 - [x] **D4** ⚪ [Nice] Prometheus alert rules. ✅
-  `deploy/observability/alerts.yml` (API down, 5xx rate, p99 latency, LLM error rate, all-LLM-failing, **gate verified-fraction collapse** = the trust signal, ingest quarantine rate, slow pipeline node). Wired via `rule_files` + compose mount. Note: worker liveness is log-based (no metrics endpoint) — alert via Loki.
+  `deploy/observability/alerts.yml` (API down, 5xx rate, p99 latency, LLM error rate, all-LLM-failing, **gate verified-fraction collapse** = the trust signal, ingest quarantine rate, slow pipeline node). Wired via `rule_files` + compose mount. Worker now serves /livez, /readyz and /metrics (2026-11-19).
   Files: `deploy/observability/alerts.yml`, `deploy/observability/prometheus.yml`, `docker-compose.observability.yml`
 
 - [x] **D5** ⚪ [Nice] Rollback runbook. ✅

@@ -1,23 +1,41 @@
-# Veriscope frontend — build the Vite bundle, serve it with nginx, and proxy
-# /api to the backend container. Result: the whole app lives at ONE URL, so a
-# reviewer runs `docker compose --profile app up` and opens http://localhost:8080.
+# Veriscope frontend: build the Vite bundle, serve it with an UNPRIVILEGED
+# nginx, and proxy /api to the backend. One image for compose and Cloud Run;
+# nginx.conf is a template filled from env at start-up (PORT, API_UPSTREAM,
+# API_HOST).
 #
-# Auth is optional: pass VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY as build
-# args to enable sign-in. Omit them (the default) for a zero-config open demo.
+# Sign-in is configured at BUILD time. Identity Platform: VITE_IDP_API_KEY,
+# VITE_IDP_AUTH_DOMAIN, VITE_IDP_PROJECT_ID (+ optional VITE_IDP_TENANT_ID).
+# Supabase (cut-over / rollback): VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY.
+# VITE_AUTH_PROVIDER picks one explicitly. All of these are public by design
+# (the browser API key is a client identifier, restricted by referrer, not a
+# secret), which is why build-time baking is acceptable. None set = open app.
 FROM node:20-alpine AS build
 WORKDIR /app
 
+ARG VITE_AUTH_PROVIDER=""
+ARG VITE_IDP_API_KEY=""
+ARG VITE_IDP_AUTH_DOMAIN=""
+ARG VITE_IDP_PROJECT_ID=""
+ARG VITE_IDP_TENANT_ID=""
 ARG VITE_SUPABASE_URL=""
 ARG VITE_SUPABASE_ANON_KEY=""
-ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL \
-    VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
+ARG VITE_SENTRY_DSN=""
+ARG VITE_RELEASE="dev"
+ENV VITE_AUTH_PROVIDER=$VITE_AUTH_PROVIDER     VITE_IDP_API_KEY=$VITE_IDP_API_KEY     VITE_IDP_AUTH_DOMAIN=$VITE_IDP_AUTH_DOMAIN     VITE_IDP_PROJECT_ID=$VITE_IDP_PROJECT_ID     VITE_IDP_TENANT_ID=$VITE_IDP_TENANT_ID     VITE_SUPABASE_URL=$VITE_SUPABASE_URL     VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY     VITE_SENTRY_DSN=$VITE_SENTRY_DSN     VITE_RELEASE=$VITE_RELEASE
 
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM nginx:1.27-alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# nginx-unprivileged runs as uid 101 and cannot bind below 1024, so the
+# container never needs root (and listens on 8080, Cloud Run's default).
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+ENV PORT=8080 \
+    API_UPSTREAM=http://api:8000 \
+    API_HOST=api
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD wget -q -O /dev/null "http://127.0.0.1:${PORT}/livez" || exit 1

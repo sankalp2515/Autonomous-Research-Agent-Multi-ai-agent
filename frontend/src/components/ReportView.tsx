@@ -340,8 +340,12 @@ export default function ReportView({
     <div className="rp rise-in">
       <div className="rp-body">
         <div className="export-bar">
-          <span className="rp-kick">Verified systematic review</span>
-          {shared && <span className="rp-shared-badge">🔗 Shared · read-only</span>}
+          {/* Not "Verified systematic review": the badge overclaims the moment
+              one sentence is derived rather than quote-verified, and the gate
+              itself has a measured false-accept rate (docs/EVALUATION.md). The
+              composition line below says exactly what was verified. */}
+          <span className="rp-kick">Systematic review</span>
+          {shared && <span className="rp-shared-badge">Shared · read-only</span>}
           <span className="spacer" />
           {!shared && (
             <button className="export-open" onClick={() => setExportOpen(true)} title={title}>

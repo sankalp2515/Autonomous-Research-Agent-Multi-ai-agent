@@ -28,6 +28,7 @@ services:
       RUN_MIGRATIONS: "1"
       DB_AUTO_CREATE: "false"
       AUTH_DISABLED: "${AUTH_DISABLED:-false}"
+      APP_VERSION: "${IMAGE_TAG:-latest}"
     restart: unless-stopped
 
   worker:
@@ -36,6 +37,10 @@ services:
     environment:
       RUN_MIGRATIONS: "0"
       DB_AUTO_CREATE: "false"
+      APP_VERSION: "${IMAGE_TAG:-latest}"
+    # A long run is checkpointed per node; give an in-flight job its shutdown
+    # grace (WORKER_SHUTDOWN_GRACE_SECONDS) before Docker sends SIGKILL.
+    stop_grace_period: 30s
     restart: unless-stopped
 
   frontend:
@@ -49,5 +54,5 @@ services:
   redis:
     restart: unless-stopped
 
-  qdrant:
-    restart: unless-stopped
+  # qdrant is no longer part of the stack (pgvector); it stays behind its
+  # `qdrant` profile in the base file for the cut-over only.

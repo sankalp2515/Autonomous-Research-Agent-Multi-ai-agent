@@ -353,10 +353,10 @@ async def upload_document(
     # Bounded read: cap BEFORE buffering the whole file, so a multi-GB upload
     # can't exhaust memory ahead of the parser's size check. read(n) yields at
     # most n bytes; reading cap+1 lets us detect an over-limit file cheaply.
-    max_bytes = get_settings().ingest_max_pdf_mb * 1024 * 1024
+    max_bytes = get_settings().upload_max_pdf_mb * 1024 * 1024
     pdf_bytes = await file.read(max_bytes + 1)
     if len(pdf_bytes) > max_bytes:
-        raise ValidationFailed(f"PDF exceeds {get_settings().ingest_max_pdf_mb}MB limit")
+        raise ValidationFailed(f"PDF exceeds {get_settings().upload_max_pdf_mb}MB limit")
     if not pdf_bytes.startswith(b"%PDF"):
         raise ValidationFailed("file is not a valid PDF")
     doc = await ingest_pdf_document(
@@ -377,8 +377,8 @@ async def tombstone_document(
         raise NotFoundError("document not found")
     # Tombstone, never hard-delete: existing answers keep auditable history.
     doc.status = "tombstoned"
-    from app.stores.qdrant_store import delete_document
-    await delete_document(document_id)
+    from app.stores import vector_store
+    await vector_store.delete_document(document_id, session=session)
     return {"id": doc.id, "status": doc.status}
 
 
@@ -466,18 +466,21 @@ async def start_pipeline(
             "Wait for one to finish before starting another."
         )
 
-    run = Run(project_id=body.project_id, query=body.query)
+    launch = {"scope": body.scope, "since_year": body.since_year,
+              "until_year": body.until_year, "min_citations": body.min_citations,
+              "selected_papers": body.selected_papers}
+    run = Run(project_id=body.project_id, query=body.query, launch_params=launch)
     session.add(run)
-    await session.flush()
+    # COMMIT BEFORE ENQUEUE. The session used to commit only after this handler
+    # returned, so a fast worker could claim the job, find no run row, log "run
+    # not found" and complete the job - leaving the run at `queued` forever. If
+    # the enqueue fails after the commit, the worker's reconciler picks the run
+    # up from its row; the reverse order had no such recovery.
+    await session.commit()
     if idem_scoped:
         # Record the mapping so a later retry with the same key returns this run.
         await redis_store.idempotency_set(idem_scoped, run.id)
-    await redis_store.enqueue_job(
-        "run_pipeline",
-        {"run_id": run.id, "scope": body.scope, "since_year": body.since_year,
-         "until_year": body.until_year, "min_citations": body.min_citations,
-         "selected_papers": body.selected_papers},
-    )
+    await redis_store.enqueue_job("run_pipeline", {"run_id": run.id, **launch})
     return {"run_id": run.id, "status": "queued"}
 
 
@@ -1475,13 +1478,13 @@ async def alert_add_to_corpus(
     pdf = None
     if a.arxiv_id:
         key = blob_store.library_key(arxiv_id=a.arxiv_id)
-        if key and blob_store.has_pdf(key):
-            pdf = blob_store.load_pdf(key)
+        if key and await blob_store.ahas_pdf(key):
+            pdf = await blob_store.aload_pdf(key)
         elif a.pdf_url:
             from app.agents import sources
             pdf = await sources.download_pdf(a.pdf_url)
             if pdf and key:
-                blob_store.save_pdf(key, pdf)
+                await blob_store.asave_pdf(key, pdf)
     if pdf:
         doc = await ingest_pdf_document(
             session, project_id=a.project_id, pdf_bytes=pdf, source_type="paper",
@@ -1809,6 +1812,7 @@ async def run_resume(
     # silently doing nothing.
     await redis_store.clear_cancel(run.id)
     run.status = "queued"
+    await session.commit()  # the worker must see `queued`, not the old status
     await redis_store.enqueue_job("run_pipeline", {"run_id": run.id})
     return {"run_id": run.id, "status": "queued"}
 
