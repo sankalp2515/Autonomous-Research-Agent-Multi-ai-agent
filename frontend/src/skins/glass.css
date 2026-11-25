@@ -1,0 +1,235 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   GLASS SKIN — an optional layer over "Editorial Science"
+   ─────────────────────────────────────────────────────────────────────────
+   Every rule is scoped to :root[data-skin="glass"]. With the attribute absent
+   (VITE_SKIN=editorial, or ?skin=editorial), not one declaration here applies
+   and the base design renders exactly as before. Revert = flip the flag, or
+   delete this file and its import in main.tsx.
+
+   WHAT IT KEEPS FROM THE REFERENCE
+     frosted, layered panels floating on a warm ground; the app as one framed
+     window; serif headings; one claret accent; hairline edges.
+
+   WHAT IT DELIBERATELY DOES NOT COPY (unslop audit, docs/design/UNSLOP_AUDIT.md)
+     * multi-hue colour blobs behind content — the ground is ONE warm neutral
+       with a tonal shift toward claret paper, nothing that reads as a blob;
+     * uppercase, wide-tracked labels — sentence case at normal tracking;
+     * decorative score dials — the report has no 0-1 "quality" number, by
+       design (CLAUDE.md: evidence strength is a study count, not a score);
+     * glow, gradient text, coloured shadows, pulsing chrome.
+
+   PERFORMANCE AND ACCESS
+     blur only on large containers (never on rows), smaller blur on narrow
+     screens, opaque surfaces when the user asks for reduced transparency or
+     the browser has no backdrop-filter. Contrast is unchanged: text sits on
+     surfaces at >= 88% white over a near-white ground.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root[data-skin="glass"] {
+  /* Ground: warm paper drifting toward claret paper — one hue family. */
+  --bg: #f3efea;
+  --ground-a: #f6f2ec;
+  --ground-b: #efdedb;
+
+  /* Glass surfaces. Opacity is high on purpose: the reading column must stay
+     paper, not a blurry window onto the background. */
+  --glass: rgba(255, 255, 255, 0.62);
+  --glass-strong: rgba(255, 255, 255, 0.8);
+  --glass-edge: rgba(255, 255, 255, 0.72);
+  --glass-hair: rgba(43, 32, 32, 0.07);
+  --glass-blur: 22px;
+
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-2: rgba(255, 255, 255, 0.42);
+  --line: rgba(43, 32, 32, 0.09);
+  --line-2: rgba(43, 32, 32, 0.06);
+  --accent-soft: rgba(140, 47, 57, 0.09);
+  --accent-tint: rgba(140, 47, 57, 0.05);
+
+  /* Nested radii: panel 20 > card 14 > control 10 (padding 6 between). */
+  --r-lg: 14px;
+  --r-md: 10px;
+  --r-sm: 6px;
+  --r-panel: 20px;
+
+  /* Neutral, soft, small — never coloured. */
+  --sh-sm: 0 1px 2px rgba(43, 32, 32, 0.04);
+  --sh-md: 0 6px 24px -10px rgba(43, 32, 32, 0.14), 0 1px 2px rgba(43, 32, 32, 0.04);
+  --sh-lg: 0 24px 60px -20px rgba(43, 32, 32, 0.22), 0 2px 6px rgba(43, 32, 32, 0.05);
+  --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 10px 40px -18px rgba(43, 32, 32, 0.18);
+}
+
+/* ── Ground ─────────────────────────────────────────────────────────────── */
+:root[data-skin="glass"] body {
+  background:
+    linear-gradient(160deg, var(--ground-a) 0%, var(--bg) 46%, var(--ground-b) 100%) fixed;
+}
+
+/* ── The app is one framed window ───────────────────────────────────────── */
+:root[data-skin="glass"] .shell {
+  background: transparent;
+  padding: 12px;
+  gap: 12px;
+}
+:root[data-skin="glass"] .side,
+:root[data-skin="glass"] .main {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.15);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.15);
+  border: 1px solid var(--glass-edge);
+  outline: 1px solid var(--glass-hair);
+  outline-offset: -1px;
+  border-radius: var(--r-panel);
+  box-shadow: var(--glass-shadow);
+  overflow: hidden;
+}
+:root[data-skin="glass"] .side { border-right: 1px solid var(--glass-edge); }
+
+/* The top bar is sticky over the scrolling column, so it needs its own
+   frosting: transparent, the text scrolling beneath collided with the
+   breadcrumb (caught in the harness). */
+:root[data-skin="glass"] .topbar {
+  background: rgba(253, 251, 249, 0.78);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  backdrop-filter: blur(16px) saturate(1.15);
+  border-bottom: 1px solid var(--line);
+}
+
+/* ── Panels, cards, rail, overlays ──────────────────────────────────────── */
+:root[data-skin="glass"] .panel,
+:root[data-skin="glass"] .composer,
+:root[data-skin="glass"] .resume,
+:root[data-skin="glass"] .suggest-card {
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-edge);
+  outline: 1px solid var(--glass-hair);
+  outline-offset: -1px;
+  border-radius: var(--r-lg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), var(--sh-md);
+}
+:root[data-skin="glass"] .card { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), var(--sh-md); }
+
+:root[data-skin="glass"] .rail {
+  background: var(--glass-strong);
+  border-left: 1px solid var(--line);
+}
+
+:root[data-skin="glass"] .cmdk,
+:root[data-skin="glass"] .modal,
+:root[data-skin="glass"] .drawer {
+  background: rgba(255, 255, 255, 0.86);
+  -webkit-backdrop-filter: blur(28px) saturate(1.2);
+  backdrop-filter: blur(28px) saturate(1.2);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--sh-lg);
+}
+
+/* ── Navigation: quiet, one active surface step ─────────────────────────── */
+:root[data-skin="glass"] .side-item:hover { background: rgba(255, 255, 255, 0.55); }
+:root[data-skin="glass"] .side-item.active {
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--accent-deep);
+  box-shadow: inset 0 0 0 1px var(--line), var(--sh-sm);
+  font-weight: 500;
+}
+:root[data-skin="glass"] .side-project.active { background: rgba(255, 255, 255, 0.85); }
+
+/* ── Labels: sentence case, normal tracking (unslop: no uppercase tracked) ─ */
+:root[data-skin="glass"] .overline,
+:root[data-skin="glass"] .side-group-label {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Every label the base design sets in tracked capitals, generated from
+   styles.css. Sentence case at near-normal tracking (unslop: "Labels like
+   NAVIGATION with wide tracking become Navigation"). Source text is already
+   sentence case, so this only stops the transform. */
+:root[data-skin="glass"] #vhook .vh-pscroll h4,
+:root[data-skin="glass"] #vhook .vh-sgroup,
+:root[data-skin="glass"] #vhook .vh-srclabel,
+:root[data-skin="glass"] #vhook .vh-vtag,
+:root[data-skin="glass"] #vlp .vlp-brand .sub,
+:root[data-skin="glass"] #vlp .vlp-eyebrow,
+:root[data-skin="glass"] #vlp .vlp-ft,
+:root[data-skin="glass"] #vlp .vlp-mini-tbl th,
+:root[data-skin="glass"] #vlp .vlp-overline,
+:root[data-skin="glass"] .axcov-row .v,
+:root[data-skin="glass"] .chatctx-chip-k,
+:root[data-skin="glass"] .doc-table thead th,
+:root[data-skin="glass"] .ev-chain .k,
+:root[data-skin="glass"] .ev-chain-h,
+:root[data-skin="glass"] .export-label,
+:root[data-skin="glass"] .launch-field-label,
+:root[data-skin="glass"] .lp-contrast-tag,
+:root[data-skin="glass"] .lp-proof-title,
+:root[data-skin="glass"] .metrics-trace th,
+:root[data-skin="glass"] .orgsw-group,
+:root[data-skin="glass"] .overline,
+:root[data-skin="glass"] .pass-h,
+:root[data-skin="glass"] .pm-orglabel,
+:root[data-skin="glass"] .prog-k,
+:root[data-skin="glass"] .ra-eyebrow,
+:root[data-skin="glass"] .ra-script .role,
+:root[data-skin="glass"] .ra-script-toggle,
+:root[data-skin="glass"] .rail-head .rail-top .k,
+:root[data-skin="glass"] .resume-gaps-label,
+:root[data-skin="glass"] .rl-kind,
+:root[data-skin="glass"] .rp-abstract-label,
+:root[data-skin="glass"] .rp-fs-l,
+:root[data-skin="glass"] .rp-gap .tag,
+:root[data-skin="glass"] .rp-gap-h .kind,
+:root[data-skin="glass"] .rp-gaugecard .lab,
+:root[data-skin="glass"] .rp-keyfindings h2,
+:root[data-skin="glass"] .rp-kf-tag,
+:root[data-skin="glass"] .rp-kick,
+:root[data-skin="glass"] .rp-methods-notes b,
+:root[data-skin="glass"] .rp-nav-h,
+:root[data-skin="glass"] .rp-ref-type,
+:root[data-skin="glass"] .rp-resolver,
+:root[data-skin="glass"] .rp-sample-list h4,
+:root[data-skin="glass"] .rp-sok-state,
+:root[data-skin="glass"] .rp-table thead th,
+:root[data-skin="glass"] .sc-rec,
+:root[data-skin="glass"] .screen-table th,
+:root[data-skin="glass"] .side-group-label,
+:root[data-skin="glass"] .source-select .source-label,
+:root[data-skin="glass"] .sr-dis-vs,
+:root[data-skin="glass"] .sr-kicker,
+:root[data-skin="glass"] .sr-vf-h,
+:root[data-skin="glass"] .srcdoc .tp,
+:root[data-skin="glass"] .tech-context h5 {
+  text-transform: none;
+  letter-spacing: 0.005em;
+}
+
+/* ── Controls ───────────────────────────────────────────────────────────── */
+:root[data-skin="glass"] .btn { border-color: var(--line); background: rgba(255, 255, 255, 0.7); }
+:root[data-skin="glass"] .btn:hover { background: rgba(255, 255, 255, 0.95); }
+:root[data-skin="glass"] .input,
+:root[data-skin="glass"] .textarea,
+:root[data-skin="glass"] select { background: rgba(255, 255, 255, 0.78); }
+
+/* ── Narrow screens: less blur, tighter frame ───────────────────────────── */
+@media (max-width: 860px) {
+  :root[data-skin="glass"] { --glass-blur: 12px; --r-panel: 16px; }
+  :root[data-skin="glass"] .shell { padding: 0; gap: 0; }
+  :root[data-skin="glass"] .main { border-radius: 0; border: 0; outline: 0; }
+}
+
+/* ── No transparency where it hurts ─────────────────────────────────────── */
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-skin="glass"] {
+    --glass: #fbfaf8; --glass-strong: #fdfcfa; --surface: #fdfcfa; --surface-2: #f4f1ec;
+  }
+  :root[data-skin="glass"] .side,
+  :root[data-skin="glass"] .main,
+  :root[data-skin="glass"] .cmdk,
+  :root[data-skin="glass"] .modal,
+  :root[data-skin="glass"] .drawer { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root[data-skin="glass"] { --glass: #fbfaf8; --glass-strong: #fdfcfa; }
+}

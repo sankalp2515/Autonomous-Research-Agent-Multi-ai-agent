@@ -45,6 +45,9 @@ docs/*
 !docs/EVALUATION.md
 !docs/CALIBRATION.md
 !docs/PRODUCTION_READINESS.md
+!docs/design/
+docs/design/*
+!docs/design/UNSLOP_AUDIT.md
 demo_claude_v2.html
 demo_codex.html
 demo-landing.html
