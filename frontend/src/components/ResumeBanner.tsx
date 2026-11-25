@@ -95,7 +95,7 @@ export default function ResumeBanner({
       <div className="resume-chips">
         {data.new_alerts > 0 && (
           <button className="resume-chip alert" onClick={() => onGo("monitor")}>
-            🔔 {data.new_alerts} new paper{data.new_alerts !== 1 ? "s" : ""} matched your watches
+            {data.new_alerts} new paper{data.new_alerts !== 1 ? "s" : ""} matched your watches
           </button>
         )}
         {data.open_gaps.length > 0 && (
