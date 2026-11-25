@@ -1,4 +1,4 @@
-"""Hybrid retrieval: dense (Qdrant) + BM25 (rank-bm25) -> RRF fusion ->
+"""Hybrid retrieval: dense (pgvector) + BM25 (rank-bm25) -> RRF fusion ->
 optional cross-encoder rerank. Carried from v1; the cross-encoder's role
 is strictly relevance ordering here, never truth.
 
@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import Chunk, Document
 from app.ml.local_models import embed_texts, rerank
-from app.stores.qdrant_store import search as qdrant_search
+from app.stores import vector_store
 
 logger = get_logger("retrieval")
 
@@ -194,7 +194,7 @@ async def retrieve(
         lexical_rankings.append([cid for _, cid in sorted(
             zip(scores, ids), key=lambda t: t[0], reverse=True)][:fetch_n])
 
-    # Dense ranking (Qdrant ANN, project-filtered). We embed the query, the
+    # Dense ranking (exact cosine over pgvector, project-filtered). We embed the query, the
     # HyDE passage (answer-shaped text matches answer-shaped chunks better than
     # a question does), AND the transformed variants / decomposed sub-questions
     # so each atomic part of a compound question gets its own dense ranking —
@@ -214,10 +214,12 @@ async def retrieve(
             # Push the document filter DOWN to the store when the caller scoped
             # to specific documents; otherwise the ANN budget is spent on the
             # whole project and the scoped document's chunks rarely survive.
-            hits = await qdrant_search(vec, project_id, limit=fetch_n * 2,
-                                       document_ids=document_ids)
+            hits = await vector_store.search(vec, project_id, limit=fetch_n * 2,
+                                             document_ids=document_ids,
+                                             session=session)
             dense_rankings.append([cid for cid, _ in hits if cid in by_id])
     except Exception:
+        vector_store.record_dense_failure("hybrid")
         logger.exception("dense retrieval failed; degrading to lexical only")
 
     fused = rrf_fuse([r for r in (*dense_rankings, *lexical_rankings) if r],

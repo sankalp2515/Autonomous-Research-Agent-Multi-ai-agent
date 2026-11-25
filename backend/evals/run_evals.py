@@ -7,7 +7,7 @@ Runs the REAL grounded-chat path against a frozen mini-corpus and scores:
 - citation_accuracy          (claims cite the doc that actually supports them)
 
 Usage:  python -m evals.run_evals
-Needs: docker-compose up (postgres/redis/qdrant) + LLM API keys.
+Needs: docker compose up (postgres+pgvector/redis) + LLM API keys.
 Exit code 1 on any gate failure -> wire into CI as a release gate.
 """
 
@@ -21,7 +21,7 @@ from app.db.models import Project
 from app.db.session import init_db, session_scope
 from app.ingestion.pipeline import ingest_text_document
 from app.services.grounded import grounded_chat
-from app.stores.qdrant_store import ensure_collection
+from app.stores.vector_store import ensure_ready as ensure_collection
 
 logger = get_logger("evals")
 

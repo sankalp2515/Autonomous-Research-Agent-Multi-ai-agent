@@ -21,11 +21,12 @@ async def _import_one(project_id: str, e: dict) -> bool:
     title = e.get("title") or ""
     if arxiv_id:
         key = blob_store.library_key(arxiv_id=arxiv_id)
-        pdf = blob_store.load_pdf(key) if key and blob_store.has_pdf(key) else None
+        pdf = (await blob_store.aload_pdf(key)
+               if key and await blob_store.ahas_pdf(key) else None)
         if pdf is None:
             pdf = await sources.download_pdf(f"https://arxiv.org/pdf/{arxiv_id}")
             if pdf and key:
-                blob_store.save_pdf(key, pdf)
+                await blob_store.asave_pdf(key, pdf)
         if pdf:
             async with session_scope() as session:
                 await ingest_pdf_document(

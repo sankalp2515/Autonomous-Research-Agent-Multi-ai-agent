@@ -36,6 +36,13 @@ _HOT_INDEXES = (
 
 def upgrade() -> None:
     bind = op.get_bind()
+    # This baseline builds from the LIVE models, so on a fresh database it
+    # creates columns that later revisions add (0007 added a pgvector column).
+    # Any extension a live model's column type needs must therefore exist
+    # before create_all runs. Later revisions are idempotent for this reason.
+    if bind.dialect.name == "postgresql":
+        from sqlalchemy import text
+        bind.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     # checkfirst: only create tables/indexes that are missing, so this is safe
     # to run against a partially-populated database.
     Base.metadata.create_all(bind=bind, checkfirst=True)

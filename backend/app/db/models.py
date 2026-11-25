@@ -1,8 +1,9 @@
 """System-of-record schema (Supabase Postgres / any Postgres).
 
 Custody rule from ARCHITECTURE.md: this database is durable truth.
-Qdrant holds only vectors keyed by chunk id (rebuildable from here).
-Redis holds only ephemeral state (rebuildable from here).
+Dense vectors live HERE too, on the chunk row (pgvector) - see
+app/stores/pgvector_store.py. Redis holds only ephemeral state (rebuildable
+from here).
 """
 
 import uuid
@@ -11,7 +12,41 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, JSON,
 )
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import UserDefinedType
+
+# Width of the chunk embedding column. It is a SCHEMA fact, not a tunable: the
+# column is `vector(384)`, so changing the embedding model to one of a different
+# width needs a migration, not an env var. `pgvector_store.ensure_ready` compares
+# this against the live column and against settings.embedding_dim at boot, so a
+# mismatch refuses to start instead of failing on the first insert.
+EMBEDDING_DIM = 384
+
+
+class Embedding(UserDefinedType):
+    """pgvector `vector(N)` - DDL only.
+
+    Vectors are never read or written through the ORM: the column is `deferred`
+    and every access goes through app/stores/pgvector_store.py, which casts
+    through text (`CAST(CAST(:v AS text) AS vector)`). That keeps the driver out
+    of it entirely - asyncpg has no codec for `vector`, and registering one per
+    connection is one more thing that can be silently missing on a new pool."""
+
+    cache_ok = True
+
+    def __init__(self, dim: int = EMBEDDING_DIM):
+        self.dim = dim
+
+    def get_col_spec(self, **kw) -> str:
+        return f"vector({self.dim})"
+
+
+@compiles(Embedding, "sqlite")
+def _embedding_sqlite(type_, compiler, **kw) -> str:
+    # Unit tests run on SQLite, which has no vector type. The column exists so
+    # the schema matches; nothing in the test suite reads it.
+    return "TEXT"
 
 
 def _uuid() -> str:
@@ -148,7 +183,14 @@ class Chunk(Base):
     char_end: Mapped[int] = mapped_column(Integer, default=0)
     ordinal: Mapped[int] = mapped_column(Integer, default=0)
     text: Mapped[str] = mapped_column(Text)
+    # True while `embedding` holds a vector. Kept as its own column because the
+    # cold-tier eviction and the reindex job filter on it, and a boolean index
+    # is cheaper than `embedding IS NOT NULL` over a wide column.
     embedded: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Dense vector of context_text(title, section, text). Deferred so ordinary
+    # chunk loads never pull 1.5KB per row they do not need.
+    embedding: Mapped[str | None] = mapped_column(
+        Embedding(EMBEDDING_DIM), nullable=True, deferred=True)
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
@@ -168,6 +210,12 @@ class Run(TimestampMixin, Base):
     budgets_spent: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str] = mapped_column(Text, default="")
     report_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # What the user asked for at launch: scope, year window, citation floor,
+    # hand-picked papers. Persisted on the row because the row - not the queue
+    # message - is what recovery rebuilds a job from. Without it a run orphaned
+    # before its first checkpoint resumed with DEFAULT filters and answered a
+    # different question than the one the user configured, with no visible sign.
+    launch_params: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Report(TimestampMixin, Base):

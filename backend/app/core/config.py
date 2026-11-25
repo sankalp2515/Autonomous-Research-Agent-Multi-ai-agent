@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # Backpressure — shed load gracefully instead of melting the worker pool.
     max_concurrent_runs_per_project: int = 2   # per-project admission cap
     max_queue_depth: int = 200                 # global shed threshold (503 above this)
+    # SIGTERM grace for an in-flight job before it is handed back to the queue
+    # (uncounted). Keep it under the platform's kill window: Cloud Run sends
+    # SIGKILL 10s after SIGTERM, Kubernetes after terminationGracePeriodSeconds.
+    worker_shutdown_grace_seconds: float = 8.0
 
     # Per-caller API rate limit (requests/min, fixed window). Coarse DoS/abuse
     # guard applied in middleware; keyed on the auth token when present, else IP.
@@ -87,6 +91,10 @@ class Settings(BaseSettings):
     # Trust X-Forwarded-For for the client IP (enable ONLY behind a proxy you
     # control, or clients can spoof their rate-limit identity).
     trust_forwarded_for: bool = False
+    # How many proxies APPEND to X-Forwarded-For in front of the app. Cloud Run
+    # alone: 1. External HTTPS load balancer in front of Cloud Run: 2. The
+    # client IP is the entry this many places from the right.
+    trusted_proxy_hops: int = 1
     # Tighter per-subject budget for the expensive pipeline endpoint.
     pipeline_rate_limit_per_min: int = 10
     supabase_publishable_key: str = ""   # frontend sign-in key (not a secret)
@@ -99,8 +107,26 @@ class Settings(BaseSettings):
 
     # Stores
     redis_url: str = "redis://localhost:6379/0"
+    # Dense vectors. pgvector (default) stores them on chunks.embedding in the
+    # system of record; "qdrant" is the previous store, kept for one release so
+    # a bad cut-over is a config flip. See app/stores/vector_store.py.
+    vector_backend: Literal["pgvector", "qdrant"] = "pgvector"
+    # Mirror writes to the store that is NOT being read, during the migration
+    # window only, so flipping vector_backend back needs no backfill.
+    vector_dual_write: bool = False
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "chunks"
+
+    # Vertex AI (paid Gemini on Google Cloud). Set VERTEX_PROJECT to enable; it
+    # then LEADS every routing chain. No API key: auth is Application Default
+    # Credentials - the Cloud Run service account in production, `gcloud auth
+    # application-default login` on a laptop. Paid Vertex traffic is not used
+    # for model training, unlike the free AI Studio tier, which matters because
+    # prompts carry user-uploaded papers.
+    vertex_project: str = ""
+    vertex_location: str = "global"
+    vertex_model: str = "gemini-3.5-flash"
+    vertex_rpm: int = 300
 
     # LLM providers (free tier)
     gemini_api_key: str = ""
@@ -307,7 +333,14 @@ class Settings(BaseSettings):
     # constant rather than of how long the paper was, so the timeout below
     # means "the tier is wedged", not "this paper had many chunks".
     inference_embed_batch: int = 48
+    # Parse ceiling for any PDF, including ones fetched server-side from arXiv.
     ingest_max_pdf_mb: int = 50
+    # Ceiling for a PDF UPLOADED over HTTP. 30, not 50: Cloud Run's front end
+    # rejects HTTP/1.1 request bodies over 32 MiB before the app sees them, so a
+    # larger limit only promised an upload the platform would refuse. The web
+    # tier's client_max_body_size (31m) and the API's BodySizeLimit derive from
+    # this. Larger papers arrive by arXiv/DOI fetch or, later, a signed upload.
+    upload_max_pdf_mb: int = 30
     # In-flight papers during ingest. Safe to raise above the old 2: all local
     # embedding is serialized behind a single _infer_lock (ml/local_models.py),
     # so extra concurrency only overlaps the I/O-bound download + PDF parse of
@@ -320,13 +353,15 @@ class Settings(BaseSettings):
     ingest_download_concurrency: int = 10
     # Device-local paper library (PDF + parsed markdown). Checked before any
     # download so a paper is fetched from the network at most once.
-    # Next phase: swap this for S3 by reimplementing app/stores/blob_store.py.
     library_enabled: bool = True
     library_dir: str = "data/library"
     # Blob backend for the paper library. "local" = filesystem (single node);
-    # "s3" = shared object store (S3 / MinIO / R2) so multiple API+worker
-    # replicas share one library — required for horizontal scaling.
-    blob_backend: Literal["local", "s3"] = "local"
+    # "gcs" = Google Cloud Storage via Application Default Credentials (no key
+    # file: the Cloud Run service account is the identity); "s3" = S3 / MinIO /
+    # R2. A shared backend is required for more than one replica.
+    blob_backend: Literal["local", "gcs", "s3"] = "local"
+    gcs_bucket: str = ""
+    gcs_prefix: str = "library"
     s3_bucket: str = ""
     s3_prefix: str = "library"
     s3_endpoint_url: str = ""            # set for MinIO/R2; empty = real AWS S3

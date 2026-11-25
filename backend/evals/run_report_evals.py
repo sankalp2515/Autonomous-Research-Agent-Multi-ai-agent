@@ -22,7 +22,7 @@ Asserted invariants (release gates):
                                 (guards against the gate refusing everything).
 
 Usage:  python -m evals.run_report_evals
-Needs:  docker-compose up (postgres/redis/qdrant) + LLM API keys, same as
+Needs:  docker compose up (postgres+pgvector/redis) + LLM API keys, same as
         run_evals.py. Exit code 1 on any gate breach -> wire into CI.
 """
 
@@ -41,7 +41,7 @@ from app.db.models import (
 )
 from app.db.session import init_db, session_scope
 from app.ingestion.pipeline import ingest_text_document
-from app.stores.qdrant_store import ensure_collection
+from app.stores.vector_store import ensure_ready as ensure_collection
 
 logger = get_logger("report-evals")
 

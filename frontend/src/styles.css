@@ -2940,6 +2940,8 @@ p { margin: 0; }
 .sr-parrow { text-align: center; color: var(--ink-3); font-size: 15px; line-height: 1.5; margin: 3px 0; }
 .sr-split { display: flex; gap: 14px; justify-content: center; }
 .sr-split > div { flex: 1 1 0; max-width: 290px; }
+.sr-pbox.is-unassessed { border-color: var(--warn); color: var(--warn); }
+.sr-pbox.is-unassessed b { color: var(--warn); }
 
 /* verification appendix */
 .sr-vf { border: 1px solid var(--rule, #d5d5c9); margin: 18px 0; }

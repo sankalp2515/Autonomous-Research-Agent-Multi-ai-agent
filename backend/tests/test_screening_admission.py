@@ -219,3 +219,92 @@ async def test_a_run_with_no_admitted_corpus_refuses(monkeypatch):
 
 def test_research_route_continues_when_a_corpus_exists():
     assert nodes.research_route({"paper_doc_ids": ["d1"]}) == "extract_evidence"
+
+
+# ── Incomplete screening responses (found by evals/screening_bench.py) ─────
+#
+# On a published review (Hall 2012, SYNERGY) the screen lost 54 of 104 included
+# studies, and only 7 of those were the model disagreeing with the reviewers:
+# a truncated JSON response, "repaired" from its first 3,000 characters,
+# returned verdicts for only part of each batch, and the funnel counted the
+# silent remainder as "screened out". Some repaired verdicts also carried
+# indices from OTHER batches, which the keep-set applied to papers that call
+# never showed the model.
+
+def _partial(answer_first: int, include: bool = True):
+    """A screen that answers only the first `answer_first` candidates of each
+    prompt — the shape a truncated-then-repaired response takes."""
+    async def fake(_kind, prompt, _schema, **_kw):
+        idx = [int(ln[1:ln.index("]")]) for ln in prompt.splitlines() if ln.startswith("[")]
+        return ScreeningResult(papers=[
+            ScreenedPaper(index=i, relevant=include, reason="r", score=0.9 if include else 0.1)
+            for i in idx[:answer_first]])
+    return fake
+
+
+async def test_a_candidate_with_no_verdict_is_rescreened(state, monkeypatch):
+    calls = []
+
+    async def fake(_kind, prompt, _schema, **_kw):
+        calls.append(prompt)
+        # First round answers only 2 of 6; the re-screen round answers all.
+        n = 2 if len(calls) == 1 else 99
+        return await _partial(n)(_kind, prompt, _schema)
+
+    monkeypatch.setattr(nodes, "complete_json", fake)
+    monkeypatch.setattr(nodes.get_settings(), "screen_batch_size", 6, raising=False)
+    hits = [_hit("arxiv", f"p-{i}") for i in range(6)]
+    out = await nodes._screen_papers(state, hits, "objective", "cs", 0)
+
+    assert len(out) == 6, "the papers the first response dropped were never re-asked"
+    assert state["funnel"]["screen_rescreened"] == 4
+    assert state["funnel"]["screen_unassessed"] == 0
+
+
+async def test_still_unassessed_papers_are_not_counted_as_screened_out(state, monkeypatch):
+    """The funnel's 'screened out' is a verdict about the paper. A paper the
+    screen never answered for is a fact about US and must say so."""
+    monkeypatch.setattr(nodes, "complete_json", _partial(1, include=False))
+    monkeypatch.setattr(nodes.get_settings(), "screen_batch_size", 4, raising=False)
+    hits = [_hit("arxiv", f"p-{i}") for i in range(4)]
+    out = await nodes._screen_papers(state, hits, "objective", "cs", 0)
+
+    f = state["funnel"]
+    assert out == []
+    assert f["screened"] + f["screen_unassessed"] == 4
+    assert f["screened_out"] == f["screened"], "only judged papers are 'screened out'"
+    assert f["screen_unassessed"] >= 1
+    assert state["exclusion_counts"].get("screen_no_verdict") == f["screen_unassessed"]
+    assert any("returned without a verdict" in n for n in state["coverage_notes"])
+
+
+async def test_a_verdict_for_an_index_outside_its_batch_is_ignored(state, monkeypatch):
+    """Batch A's response naming index 7 must not admit paper 7, which batch A
+    never saw (and batch B rejected)."""
+    async def fake(_kind, prompt, _schema, **_kw):
+        idx = [int(ln[1:ln.index("]")]) for ln in prompt.splitlines() if ln.startswith("[")]
+        papers = [ScreenedPaper(index=i, relevant=False, reason="no", score=0.1) for i in idx]
+        if 0 in idx:   # batch A also "includes" a paper from batch B
+            papers.append(ScreenedPaper(index=7, relevant=True, reason="hallucinated", score=0.95))
+        return ScreeningResult(papers=papers)
+
+    monkeypatch.setattr(nodes, "complete_json", fake)
+    monkeypatch.setattr(nodes.get_settings(), "screen_batch_size", 4, raising=False)
+    monkeypatch.setattr(nodes.get_settings(), "screen_batch_concurrency", 1, raising=False)
+    hits = [_hit("arxiv", f"p-{i}") for i in range(8)]
+    out = await nodes._screen_papers(state, hits, "objective", "cs", 0)
+
+    assert out == [], f"admitted by a verdict from the wrong batch: {[h.title for h in out]}"
+    assert state["funnel"]["screen_foreign_verdicts"] == 1
+
+
+async def test_the_screen_asks_for_an_output_budget_that_fits_the_batch(state, monkeypatch):
+    seen = {}
+
+    async def fake(_kind, prompt, _schema, **kw):
+        seen["max_tokens"] = kw.get("max_tokens")
+        return await _partial(99)(_kind, prompt, _schema)
+
+    monkeypatch.setattr(nodes, "complete_json", fake)
+    await nodes._screen_papers(state, [_hit("arxiv", "p")], "objective", "cs", 0)
+    assert seen["max_tokens"] and seen["max_tokens"] >= 8192

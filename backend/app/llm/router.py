@@ -62,7 +62,10 @@ T = TypeVar("T", bound=BaseModel)
 # first-order one (which model answers at all). gemini leads because it is the
 # provider scaled with keys here; groq is last because it is the fallback that
 # must still answer when the first two are throttled.
-_CHAIN = ["gemini", "openrouter", "groq"]
+# vertex leads when VERTEX_PROJECT is set (paid, project-scoped quota, no
+# training on prompts); unconfigured providers are skipped, so without it the
+# chain is exactly the free fleet it was.
+_CHAIN = ["vertex", "gemini", "openrouter", "groq"]
 
 ROUTING: dict[str, list[str]] = {
     "intent":          _CHAIN,
@@ -90,6 +93,10 @@ _DEFAULT_CHAIN = _CHAIN
 # throttled do we do a single short bounded wait. Cross-provider failover is now
 # effectively instant.
 _THROTTLE_SHORT_WAIT = 20  # last-resort wait when the WHOLE chain is throttled
+# How much of a failed JSON output the repair prompt echoes back. Large enough
+# for a full batch response (a 15-paper screen is ~5k chars), bounded so a
+# runaway output cannot blow the repair call's own context.
+_REPAIR_ECHO_CHARS = 24000
 _CALL_TIMEOUT = 150        # hard ceiling per provider call; a hang fails over
 _CIRCUIT_TTL = 300         # cooldown after a hard (auth/payment) provider failure
 
@@ -325,11 +332,16 @@ async def complete_json(step: str, prompt: str, schema: type[T], *,
             await redis_store.cache_delete(key)
         logger.info("json repair attempt", extra={
             "step": step, "provider": result.provider, "error": str(first_err)[:200]})
+        # The repair must see the WHOLE failed output. It used to see the first
+        # 3,000 characters, so one malformed field in a 15-item list came back
+        # "repaired" as the 9 items that fit — valid, and silently incomplete
+        # (measured on the screen: 78 of 304 papers lost this way).
         repair_prompt = (
             "Your previous output failed validation.\n"
             f"Error: {str(first_err)[:500]}\n"
-            f"Previous output: {result.text[:3000]}\n"
-            "Return ONLY corrected JSON matching the schema."
+            f"Previous output: {result.text[:_REPAIR_ECHO_CHARS]}\n"
+            "Return ONLY corrected JSON matching the schema, keeping EVERY item "
+            "the previous output contained."
         )
         # Prefer a DIFFERENT provider for the repair: a cached result has
         # provider "cache" (nothing to exclude); a live one excludes the model

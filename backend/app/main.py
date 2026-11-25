@@ -4,6 +4,7 @@ Startup is fail-fast in prod (a half-alive API is worse than a dead one)
 and tolerant in dev so the API can boot before docker-compose is up.
 """
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -16,7 +17,7 @@ from app.core.exceptions import AppError
 from app.core.logging import configure_logging, get_logger
 from app.core.observability import install_observability
 from app.db.session import init_db
-from app.stores.qdrant_store import ensure_collection
+from app.stores import vector_store
 
 logger = get_logger("main")
 
@@ -27,7 +28,7 @@ async def lifespan(app: FastAPI):
     configure_logging(settings.log_level, settings.log_format)
     try:
         await init_db()
-        await ensure_collection()
+        await vector_store.ensure_ready()
     except Exception:
         if settings.app_env == "prod":
             raise
@@ -53,40 +54,26 @@ def _init_sentry(settings) -> None:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    # Fail closed: a production deployment must never run with auth disabled.
-    # This turns the single worst footgun (open API because AUTH_DISABLED was
-    # left at its dev default) into a loud boot-time refusal.
-    if settings.app_env == "prod" and settings.auth_disabled:
-        raise RuntimeError(
-            "AUTH_DISABLED=true is not permitted when APP_ENV=prod — refusing to "
-            "start an unauthenticated API. Set AUTH_DISABLED=false and configure "
-            "SUPABASE_URL."
-        )
+    # Fail closed on development settings in production: auth off, localhost
+    # stores, open /metrics, schema auto-create, local blob storage... every
+    # problem is listed at once. See app/core/prod_checks.py.
+    from app.core.prod_checks import enforce_production_settings
+    enforce_production_settings(settings, process="api")
     # Fail closed on the verification truth layer too: prod must not run the gate
     # on quote-match alone (NLI off). Same boot-time refusal posture as auth.
     from app.verification.gate import assert_verification_ready
     assert_verification_ready()
-    # Invite emails would link to localhost if app_base_url isn't set for prod.
-    if (settings.app_env == "prod" and settings.smtp_host
-            and "localhost" in settings.app_base_url):
-        logger.warning("APP_BASE_URL is still localhost while SMTP is configured — "
-                       "invite emails will link to localhost. Set APP_BASE_URL.")
     _init_sentry(settings)
     # LangSmith: wire LANGCHAIN_* env so the LangGraph pipeline auto-traces.
     from app.llm.tracing import init_langsmith
     init_langsmith()
     app = FastAPI(
-        title="Grounded Research Assistant",
-        version="0.1.0",
+        title="Veriscope API",
+        version=os.environ.get("APP_VERSION", "dev"),
         lifespan=lifespan,
         docs_url="/docs" if settings.app_env != "prod" else None,
-    )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_allow_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        redoc_url="/redoc" if settings.app_env != "prod" else None,
+        openapi_url="/openapi.json" if settings.app_env != "prod" else None,
     )
     # Rate limiting + tracing + metrics all live in install_observability's
     # middleware (per-subject fixed window, tighter bucket for /pipeline). A
@@ -94,6 +81,24 @@ def create_app() -> FastAPI:
     # Redis calls and split the budget across inconsistent keys. One source of
     # truth now.
     install_observability(app)
+    # Outermost: reject oversized bodies before any parsing. Starlette spools a
+    # multipart upload to a temp file BEFORE the handler's own size check runs,
+    # and on Cloud Run /tmp is memory - so a large upload was an OOM vector.
+    from app.core.limits import BodySizeLimit
+    app.add_middleware(BodySizeLimit, max_bytes=(settings.upload_max_pdf_mb + 1) * 1024 * 1024)
+    # CORS is added LAST so it is the OUTERMOST layer. Starlette wraps in reverse
+    # order of registration; with CORS innermost, a 429 from the rate limiter or
+    # a 413 from the size cap went out without CORS headers, and the browser
+    # reported an opaque network error instead of "slow down" / "file too large".
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allow_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Request-Id"],
+        expose_headers=["X-Request-Id", "Retry-After"],
+        max_age=600,
+    )
 
     # OpenTelemetry request/httpx/redis spans (no-op unless OTEL_ENABLED).
     from app.core.otel import init_otel
@@ -114,10 +119,18 @@ def create_app() -> FastAPI:
             body["message"] = str(exc)[:500]
         return JSONResponse(status_code=500, content=body)
 
-    @app.get("/health", include_in_schema=False)
-    async def health():
-        # Deep health: check each dependency so orchestration can tell a
-        # half-alive API from a healthy one. Never raises - reports per-dep.
+    @app.get("/livez", include_in_schema=False)
+    async def livez():
+        """Liveness: the process can serve a request. Checks NO dependency on
+        purpose - a liveness probe that fails on a database blip makes the
+        orchestrator restart every replica at once, turning a brief outage into
+        a full one."""
+        return {"status": "ok"}
+
+    async def _readiness() -> JSONResponse:
+        """Readiness: every dependency a request needs. 503 when any is down so
+        a load balancer stops routing here (the old /health returned 200 with
+        status="degraded", which no load balancer reads)."""
         deps: dict[str, str] = {}
         try:
             from sqlalchemy import text
@@ -133,15 +146,35 @@ def create_app() -> FastAPI:
             deps["redis"] = "ok"
         except Exception as exc:
             deps["redis"] = f"down: {str(exc)[:80]}"
-        try:
-            from app.stores.qdrant_store import get_qdrant
-            await get_qdrant().get_collections()
-            deps["qdrant"] = "ok"
-        except Exception as exc:
-            deps["qdrant"] = f"down: {str(exc)[:80]}"
+        name, state = await vector_store.health()
+        deps[name] = state
+        from app.stores import blob_store
+        deps["blob_store"] = await blob_store.health()
         healthy = all(v == "ok" for v in deps.values())
-        return {"status": "ok" if healthy else "degraded",
-                "env": settings.app_env, "dependencies": deps}
+        body = {"status": "ok" if healthy else "degraded",
+                "version": os.environ.get("APP_VERSION", "dev")}
+        # Dependency detail is for operators; in prod it is not echoed to the
+        # internet (error strings can carry hostnames).
+        if settings.app_env != "prod":
+            body["env"] = settings.app_env
+            body["dependencies"] = deps
+        else:
+            body["dependencies"] = {k: ("ok" if v == "ok" else "down") for k, v in deps.items()}
+        return JSONResponse(status_code=200 if healthy else 503, content=body)
+
+    @app.get("/readyz", include_in_schema=False)
+    async def readyz():
+        return await _readiness()
+
+    # /health kept for existing probes and the deploy smoke test; /api/health so
+    # the check is reachable through the web origin (nginx proxies /api only).
+    @app.get("/health", include_in_schema=False)
+    async def health():
+        return await _readiness()
+
+    @app.get("/api/health", include_in_schema=False)
+    async def api_health():
+        return await _readiness()
 
     app.include_router(router)
     return app

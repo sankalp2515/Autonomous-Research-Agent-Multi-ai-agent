@@ -6,7 +6,13 @@
 #   QDRANT_PORT=6400
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 = official postgres:16 + the pgvector extension.
+    # Chunk vectors live in Postgres now (app/stores/pgvector_store.py).
+    # SWITCHING FROM postgres:16-alpine ON AN EXISTING VOLUME: same major
+    # version, so the data directory is compatible, but alpine (musl) and this
+    # Debian (glibc) image sort text differently. Rebuild text indexes once:
+    #   docker compose exec postgres psql -U postgres -d research -c "REINDEX DATABASE research;"
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -34,7 +40,12 @@ services:
       timeout: 3s
       retries: 10
 
+  # Previous vector store. Only needed during the pgvector cut-over (to run
+    # scripts/backfill_pgvector.py, or VECTOR_BACKEND=qdrant as a rollback):
+    #   docker compose --profile qdrant up -d qdrant
+    # Remove together with app/stores/qdrant_store.py after one release.
   qdrant:
+    profiles: ["qdrant"]
     image: qdrant/qdrant:v1.12.4
     ports:
       - "${QDRANT_PORT:-6333}:6333"
@@ -70,19 +81,14 @@ services:
       # observability profile is up. Harmless no-op otherwise.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
       OTEL_SERVICE_NAME: veriscope-api
-      # Persist the HF model cache (below) and authenticate downloads so a
-      # fresh container doesn't re-fetch ~500MB and get rate-limited (which
-      # hung the worker for >10min). Fail fast instead of hanging forever.
-      HF_HOME: /models
-      HF_HUB_DOWNLOAD_TIMEOUT: "30"
-    volumes:
-      - hf_cache:/models
+      # Model weights are baked into the image (backend/Dockerfile) and the
+      # hub is offline at runtime, exactly as in production. No cache volume:
+      # mounting one over /models would hide the baked weights.
     ports:
       - "8210:8000"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-      qdrant: { condition: service_healthy }
 
   # The whole app at one URL. `docker compose --profile app up` builds the UI,
   # serves it via nginx, and proxies /api to the api container — a reviewer just
@@ -96,7 +102,7 @@ services:
         VITE_SUPABASE_URL: "${VITE_SUPABASE_URL:-}"
         VITE_SUPABASE_ANON_KEY: "${VITE_SUPABASE_ANON_KEY:-}"
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_PORT:-8080}:8080"
     depends_on:
       - api
 
@@ -104,6 +110,12 @@ services:
     profiles: ["app"]
     build: ./backend
     command: ["python", "-m", "app.worker"]
+    # Health + Prometheus metrics (/livez, /readyz, /metrics) on $PORT (8000 in
+    # the image). The gate and pipeline metrics live in THIS process.
+    ports:
+      # A host port RANGE so `--scale worker=N` (N <= 5) does not collide.
+      - "8211-8215:8000"
+    stop_grace_period: 30s
     env_file: ./backend/.env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/research
@@ -112,15 +124,10 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
       OTEL_SERVICE_NAME: veriscope-worker
       INFERENCE_SERVICE_URL: "${INFERENCE_SERVICE_URL:-}"
-      # Model cache + authenticated, bounded downloads (see api service above).
-      HF_HOME: /models
-      HF_HUB_DOWNLOAD_TIMEOUT: "30"
-    volumes:
-      - hf_cache:/models
+      # Model weights are baked into the image (see the api service).
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-      qdrant: { condition: service_healthy }
 
   # ── Model tier (Phase 2, opt-in: `docker compose --profile models up`) ──────
   # Serves embeddings / rerank / NLI so inference scales independently of the API
@@ -142,8 +149,6 @@ services:
       # MUST be empty here — this IS the inference tier (the server refuses to
       # boot otherwise, to prevent proxy-to-self recursion).
       INFERENCE_SERVICE_URL: ""
-      HF_HOME: /models
-      HF_HUB_DOWNLOAD_TIMEOUT: "30"
       # Thread pinning — set HERE as well as in code because OpenMP reads its
       # pool size at library-init, before any Python in model_server.py runs.
       # Unpinned, torch took a thread per core PER concurrent request: PID 1 was
@@ -154,8 +159,6 @@ services:
       OMP_NUM_THREADS: "${INFERENCE_THREADS:-7}"
       MKL_NUM_THREADS: "${INFERENCE_THREADS:-7}"
       INFERENCE_THREADS: "${INFERENCE_THREADS:-7}"
-    volumes:
-      - hf_cache:/models
     ports:
       - "${MODELS_PORT:-8100}:8100"
     healthcheck:
@@ -173,4 +176,5 @@ volumes:
   pg_data:
   redis_data:
   qdrant_data:
-  hf_cache:      # embedding/rerank/NLI models — download once, survive restarts
+  hf_cache:      # unused since models are baked into the image; kept so an
+                 # existing volume is not orphaned. `docker volume rm` it at will.

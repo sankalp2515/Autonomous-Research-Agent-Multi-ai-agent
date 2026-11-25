@@ -107,6 +107,10 @@ function Flow({ report }: { report: Report }) {
   const screened = ladder.screened ?? f.screened;
   const included = ladder.extracted ?? f.extracted_studies;
   const screenedOut = f.screened_out;
+  // Never assessed — a fact about Veriscope, so it gets its own box in the
+  // warning colour instead of being folded into "screened out", which is a
+  // verdict about the paper.
+  const unassessed = f.screen_unassessed ?? 0;
 
   if (!discovered && !screened) return null;
 
@@ -161,6 +165,17 @@ function Flow({ report }: { report: Report }) {
                   .join(" · ")}
               </span>
             ) : null}
+          </div>
+        ) : null}
+        {unassessed ? (
+          <div className="sr-pbox is-unassessed">
+            Not assessed<br />
+            <b>n = {unassessed}</b>
+            <span className="sr-dim">
+              <br />
+              the screen returned no verdict for these (a failed call or an
+              incomplete response); they were excluded, not judged
+            </span>
           </div>
         ) : null}
       </div>

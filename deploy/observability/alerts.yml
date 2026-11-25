@@ -100,3 +100,27 @@ groups:
         annotations:
           summary: "Pipeline node p95 above 5 minutes ({{ $labels.node }})"
           description: "Node {{ $labels.node }} p95 duration exceeds 300s — investigate external source / inference contention."
+
+  - name: veriscope-retrieval-and-queue
+    rules:
+      - alert: VeriscopeDenseRetrievalDegraded
+        expr: sum(increase(retrieval_dense_degraded_total[15m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Dense retrieval is failing; ranking fell back to lexical only"
+          description: "Reports still complete but with half their retrieval missing, so this is a QUALITY incident. Check worker logs for 'dense ranking failed' and pgvector health (/readyz)."
+      - alert: VeriscopeDeadLetteredJobs
+        expr: max(job_queue_depth{queue="dead"}) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Jobs are in the dead-letter queue"
+          description: "A job failed or killed its worker 3 times. LRANGE jobs:dead 0 -1; a run's row carries the error (docs/RUNBOOK.md)."
+      - alert: VeriscopeQueueBacklog
+        expr: max(job_queue_depth{queue="main"}) > 20
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Job queue backlog above 20 for 15 minutes"
+          description: "Workers are not keeping up (or none is running). Scale worker_max_instances or check worker /readyz."

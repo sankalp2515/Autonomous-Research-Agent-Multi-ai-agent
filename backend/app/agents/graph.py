@@ -206,10 +206,18 @@ async def execute_run(run_id: str, scope: str = "all", since_year: int = 0,
                             extra={"node": run.current_node,
                                    "work_seconds_so_far": round(spent)})
             else:
-                state = new_state(run_id, run.project_id, run.query, scope=scope,
-                                  since_year=since_year, until_year=until_year,
-                                  min_citations=min_citations,
-                                  selected_papers=selected_papers or [])
+                # The row is the source of truth for launch filters; the job
+                # payload is only a copy, and a recovered job carries just the
+                # run id. Fall back to the arguments for rows written before
+                # launch_params existed.
+                lp = run.launch_params or {}
+                state = new_state(run_id, run.project_id, run.query,
+                                  scope=lp.get("scope", scope),
+                                  since_year=lp.get("since_year", since_year),
+                                  until_year=lp.get("until_year", until_year),
+                                  min_citations=lp.get("min_citations", min_citations),
+                                  selected_papers=lp.get("selected_papers",
+                                                         selected_papers or []))
             run.status = "running"
 
         try:

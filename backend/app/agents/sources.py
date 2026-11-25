@@ -270,19 +270,55 @@ def _is_safe_public_url(url: str) -> bool:
     return True
 
 
+_MAX_REDIRECTS = 5
+
+
+class _TooLarge(Exception):
+    pass
+
+
+@retry_external
+async def _fetch_capped(url: str, max_bytes: int) -> bytes | None:
+    """GET `url` for an UNTRUSTED fetch: every redirect hop is re-checked
+    against the SSRF guard, and the body is streamed with a byte cap.
+
+    Both used to be missing. httpx followed redirects on its own, so a public
+    URL that answered 302 -> http://10.0.0.5/ reached into the VPC (the guard
+    only saw the first hop). And the whole response was buffered before the
+    size check, so a multi-gigabyte body could exhaust the worker's memory."""
+    current = url
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as client:
+        for _ in range(_MAX_REDIRECTS + 1):
+            if not await asyncio.to_thread(_is_safe_public_url, current):
+                logger.warning("blocked non-public url", extra={"url": current[:120]})
+                return None
+            async with client.stream("GET", current) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location", "")
+                    if not location:
+                        return None
+                    current = str(resp.url.join(location))
+                    continue
+                resp.raise_for_status()
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > max_bytes:
+                    return None
+                buf = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > max_bytes:
+                        raise _TooLarge()
+                return bytes(buf)
+    logger.warning("too many redirects", extra={"url": url[:120]})
+    return None
+
+
 async def download_pdf(url: str, *, max_mb: int = 50) -> bytes | None:
-    # SSRF check before dialing out. (Residual: a redirect to a private host is
-    # still followed by httpx; production should also pin an egress allowlist /
-    # disable auto-redirect for untrusted fetches.)
-    if not await asyncio.to_thread(_is_safe_public_url, url):
-        logger.warning("blocked non-public PDF url", extra={"url": url[:120]})
-        return None
     try:
-        resp = await _get(url)
-    except httpx.HTTPError:
+        data = await _fetch_capped(url, max_mb * 1024 * 1024)
+    except (_TooLarge, httpx.HTTPError):
         return None
-    data = resp.content
-    if len(data) > max_mb * 1024 * 1024 or not data.startswith(b"%PDF"):
+    if not data or not data.startswith(b"%PDF"):
         return None
     return data
 

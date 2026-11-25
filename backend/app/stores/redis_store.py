@@ -1,5 +1,5 @@
 """Redis: ephemeral state only (custody rule - everything here must be
-reconstructable from Postgres + Qdrant).
+reconstructable from Postgres).
 
 Provides: LLM response cache, provider token buckets, run progress
 pub/sub-ish state for the UI, and a minimal reliable job queue with
@@ -348,17 +348,58 @@ async def read_events(run_id: str) -> list[dict[str, Any]]:
     return [json.loads(x) for x in rows]
 
 
-# ── Job queue (simple, transparent, reliable enough for one worker pool) ─
+# ── Job queue: leased, reaped, never wiped ──────────────────────────────
+#
+# A job moves QUEUE -> PROCESSING atomically with a LEASE (`jobs:lease:<id>`)
+# that the executing worker renews on a heartbeat. A worker that dies stops
+# renewing; the reaper finds its PROCESSING entries with no lease and puts them
+# back on the queue. That is the visibility timeout every hosted queue provides,
+# and its absence was two production bugs:
+#
+#   1. A crashed worker's job sat in PROCESSING until SOME worker restarted,
+#      because the only recovery ran at boot. With three healthy workers and one
+#      dead one, its run never moved again.
+#   2. That boot recovery DELETED the queue and rebuilt it from non-terminal
+#      Run rows - so every queued invite email, BibTeX import, reindex and
+#      monitor check was silently dropped on every worker restart.
+#
+# Jobs carry an id so a lease can name them. Entries enqueued by an older build
+# have none; the reaper treats them as leaseless and recovers them once.
 
 QUEUE = "jobs:main"
 PROCESSING = "jobs:processing"
 DLQ = "jobs:dead"
 MAX_JOB_ATTEMPTS = 3
+# A lease outlives several missed heartbeats, so a slow event loop or a Redis
+# blip never makes a live job look dead. Re-delivery of a run is harmless (the
+# per-run lock admits one executor; a run resumes from its checkpoint), so the
+# cost of a false reap is a skipped duplicate, not double work.
+JOB_LEASE_TTL = 120
+JOB_LEASE_BEAT = 30
+
+_CLAIM_LUA = """
+local job = redis.call('LMOVE', KEYS[1], KEYS[2], 'LEFT', 'RIGHT')
+if job then
+  local ok, decoded = pcall(cjson.decode, job)
+  if ok and type(decoded) == 'table' and decoded['id'] then
+    redis.call('SET', 'jobs:lease:' .. decoded['id'], ARGV[1], 'EX', ARGV[2])
+  end
+end
+return job
+"""
 
 
-async def enqueue_job(kind: str, payload: dict[str, Any]) -> None:
-    job = json.dumps({"kind": kind, "payload": payload, "attempts": 0})
+def _job_id() -> str:
+    import uuid
+    return uuid.uuid4().hex
+
+
+async def enqueue_job(kind: str, payload: dict[str, Any]) -> str:
+    job_id = _job_id()
+    job = json.dumps({"id": job_id, "kind": kind, "payload": payload,
+                      "attempts": 0, "enqueued_at": int(time.time())})
     await get_redis().rpush(QUEUE, job)
+    return job_id
 
 
 async def queue_depth() -> int:
@@ -368,43 +409,155 @@ async def queue_depth() -> int:
         return -1
 
 
-async def claim_job(timeout: int = 5) -> dict[str, Any] | None:
-    """Atomically move a job to the processing list so a crashed worker
-    never loses it.
+async def dead_letter_depth() -> int:
+    try:
+        return int(await get_redis().llen(DLQ))
+    except Exception:
+        return -1
 
-    Uses a non-blocking LMOVE poll instead of BLMOVE: the blocking variant
-    holds the connection server-side for `timeout`s, which races the client
-    socket read timeout and raises spurious TimeoutErrors on an idle queue.
-    Polling sidesteps that entirely, and any transient Redis error returns
-    None (no job) so an idle or briefly-unreachable queue never kills the
-    worker loop."""
+
+def _lease_key(job: dict[str, Any]) -> str | None:
+    return f"jobs:lease:{job['id']}" if job.get("id") else None
+
+
+async def claim_job(timeout: int = 5, worker_id: str = "") -> dict[str, Any] | None:
+    """Atomically move a job to PROCESSING and take its lease.
+
+    The move and the lease are one Lua script: a reaper running between a bare
+    LMOVE and a separate SET would see a fresh job with no lease and requeue it.
+
+    Polls (non-blocking) instead of BLMOVE: the blocking variant holds the
+    connection server-side for `timeout`s, which races the client socket read
+    timeout and raises spurious TimeoutErrors on an idle queue. Any transient
+    Redis error returns None so the worker loop never dies on a blip."""
     import asyncio
     from redis import exceptions as redis_exc
 
-    deadline = asyncio.get_event_loop().time() + timeout
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     while True:
         try:
-            raw = await get_redis().lmove(QUEUE, PROCESSING, "LEFT", "RIGHT")
+            raw = await get_redis().eval(_CLAIM_LUA, 2, QUEUE, PROCESSING,
+                                         worker_id or "worker", JOB_LEASE_TTL)
         except (redis_exc.TimeoutError, redis_exc.ConnectionError) as exc:
             logger.warning("redis claim transient error", extra={"error": str(exc)[:120]})
             return None
         if raw:
-            return json.loads(raw)
-        if asyncio.get_event_loop().time() >= deadline:
+            job = json.loads(raw)
+            job["_raw"] = raw  # exact bytes for LREM; never re-serialized
+            return job
+        if loop.time() >= deadline:
             return None
         await asyncio.sleep(0.5)
 
 
+async def renew_job_lease(job: dict[str, Any], worker_id: str = "") -> bool:
+    key = _lease_key(job)
+    if key is None:
+        return True
+    try:
+        return bool(await get_redis().set(key, worker_id or "worker", ex=JOB_LEASE_TTL))
+    except Exception:
+        return False
+
+
+def _raw(job: dict[str, Any]) -> str:
+    raw = job.get("_raw")
+    if raw:
+        return raw
+    return json.dumps({k: v for k, v in job.items() if k != "_raw"})
+
+
+def _clean(job: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in job.items() if k != "_raw"}
+
+
 async def complete_job(job: dict[str, Any]) -> None:
-    await get_redis().lrem(PROCESSING, 1, json.dumps(job))
-
-
-async def fail_job(job: dict[str, Any]) -> None:
     r = get_redis()
-    await r.lrem(PROCESSING, 1, json.dumps(job))
-    job["attempts"] += 1
+    await r.lrem(PROCESSING, 1, _raw(job))
+    key = _lease_key(job)
+    if key:
+        await r.delete(key)
+
+
+async def fail_job(job: dict[str, Any], *, count_attempt: bool = True) -> str:
+    """Return a job to the queue, or dead-letter it after MAX_JOB_ATTEMPTS.
+
+    `count_attempt=False` is for a job interrupted by a graceful shutdown: it
+    did not fail, so it must not move closer to the dead-letter queue."""
+    r = get_redis()
+    removed = await r.lrem(PROCESSING, 1, _raw(job))
+    key = _lease_key(job)
+    if key:
+        await r.delete(key)
+    if not removed:
+        # The reaper already took it back (our lease lapsed). Pushing again
+        # would duplicate it.
+        return "gone"
+    job = _clean(job)
+    if count_attempt:
+        job["attempts"] = int(job.get("attempts", 0)) + 1
     if job["attempts"] >= MAX_JOB_ATTEMPTS:
         await r.rpush(DLQ, json.dumps(job))
-        logger.error("job moved to dead-letter queue", extra={"kind": job["kind"]})
-    else:
-        await r.rpush(QUEUE, json.dumps(job))
+        logger.error("job moved to dead-letter queue",
+                     extra={"kind": job.get("kind"), "job_id": job.get("id")})
+        return "dead"
+    await r.rpush(QUEUE, json.dumps(job))
+    return "requeued"
+
+
+async def reap_expired_jobs() -> tuple[int, list[dict[str, Any]]]:
+    """Requeue PROCESSING entries whose lease has lapsed (their worker died).
+
+    Counts an attempt: a job that kills its worker every time must reach the
+    dead-letter queue rather than crash-loop the fleet forever.
+
+    Returns (requeued count, jobs dead-lettered by this sweep) so the caller can
+    close out what those jobs represented (a run left at status=running)."""
+    r = get_redis()
+    recovered = 0
+    dead: list[dict[str, Any]] = []
+    for raw in await r.lrange(PROCESSING, 0, -1):
+        try:
+            job = json.loads(raw)
+        except ValueError:
+            await r.lrem(PROCESSING, 1, raw)
+            await r.rpush(DLQ, raw)
+            continue
+        key = _lease_key(job)
+        if key and await r.exists(key):
+            continue  # a live worker holds it
+        if not await r.lrem(PROCESSING, 1, raw):
+            continue  # completed between our read and now
+        job["attempts"] = int(job.get("attempts", 0)) + 1
+        if not job.get("id"):
+            job["id"] = _job_id()  # legacy entry: give it a lease-able identity
+        if job["attempts"] >= MAX_JOB_ATTEMPTS:
+            await r.rpush(DLQ, json.dumps(job))
+            logger.error("reaped job moved to dead-letter queue",
+                         extra={"kind": job.get("kind"), "job_id": job["id"]})
+            dead.append(job)
+        else:
+            await r.rpush(QUEUE, json.dumps(job))
+            recovered += 1
+    if recovered:
+        logger.warning("requeued jobs from dead workers", extra={"count": recovered})
+    return recovered, dead
+
+
+async def queued_run_ids() -> set[str]:
+    """Run ids that already have a job waiting or executing - so the run
+    reconciler never enqueues a second job for a run that has one."""
+    r = get_redis()
+    ids: set[str] = set()
+    for key in (QUEUE, PROCESSING):
+        for raw in await r.lrange(key, 0, -1):
+            try:
+                job = json.loads(raw)
+            except ValueError:
+                continue
+            if job.get("kind") == "run_pipeline":
+                rid = (job.get("payload") or {}).get("run_id")
+                if rid:
+                    ids.add(rid)
+    return ids

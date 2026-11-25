@@ -40,7 +40,10 @@ jobs:
     # breaks the deploy — the one place this pipeline must not be approximate.
     services:
       postgres:
-        image: postgres:16-alpine
+        # The production engine: Postgres 16 WITH pgvector (Cloud SQL ships it).
+        # Migration 0007 creates the extension and a vector column; a plain
+        # postgres image would fail it, and so should CI.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -73,6 +76,22 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/research
         run: alembic upgrade head
+      - name: Migrations are re-runnable and reversible one step
+        # Every revision is written idempotent; prove it, and prove the newest
+        # one can be rolled back and re-applied (the rollback runbook depends
+        # on exactly that).
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/research
+        run: |
+          alembic upgrade head
+          alembic downgrade -1
+          alembic upgrade head
+      - name: Integration tests against real Postgres + pgvector
+        # The unit suite runs on SQLite; these exercise the SQL that only
+        # Postgres can run (vector casts, <=> ordering, savepoints).
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/research
+        run: pytest -q -m integration
 
   # ── 2. Frontend: type-check + production build ──────────────────────────────
   frontend:
@@ -149,10 +168,13 @@ jobs:
         # Dependabot PRs; a real fix is a dependency bump, not a red CI run on
         # code that changed nothing.
         continue-on-error: true
+        # Advisory but VISIBLE: the old `|| true` inside a continue-on-error
+        # step meant the step could never even turn yellow. Findings now show
+        # as a warning annotation on the run.
         run: |
           pip install pip-audit
-          pip install -e "."
-          pip-audit --strict --progress-spinner off || true
+          pip install -e ".[gcp]"
+          pip-audit --progress-spinner off || echo "::warning::pip-audit reported vulnerable dependencies (see log)"
 
       - name: npm audit (fails on high/critical only)
         working-directory: frontend
@@ -176,11 +198,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build backend image (lean, no heavy ML)
+      - name: Build backend image (the production build, ML + baked models)
+        # This used to build INSTALL_ML=0 while release pushed the full ML
+        # image - so the image users ran was never the image that was scanned.
         uses: docker/build-push-action@v6
         with:
           context: ./backend
-          build-args: INSTALL_ML=0
           push: false
           load: true
           tags: veriscope-backend:ci
@@ -195,6 +218,17 @@ jobs:
           tags: veriscope-frontend:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Image runs as non-root and answers /livez
+        run: |
+          test "$(docker inspect -f '{{.Config.User}}' veriscope-backend:ci)" = "10001:10001"
+          docker run -d --name smoke -e APP_ENV=dev -e ML_NLI_ENABLED=false \
+            -e DATABASE_URL=postgresql+asyncpg://nobody:x@127.0.0.1:1/none \
+            -p 18000:8000 veriscope-backend:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:18000/livez && exit 0
+            sleep 2
+          done
+          docker logs smoke; exit 1
       - name: Scan backend image (Trivy)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -281,6 +315,8 @@ jobs:
           build-args: |
             VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
             VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
+            VITE_SENTRY_DSN=${{ secrets.VITE_SENTRY_DSN }}
+            VITE_RELEASE=${{ github.sha }}
 
       - name: Summary
         run: |
@@ -293,90 +329,128 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── 7. Deploy (CD): pull the released images on the host ───────────────────
-  # Self-disabling: with no DEPLOY_HOST secret configured the job reports that
-  # the pipeline stops at the registry and exits green. A deploy step that fails
-  # because nobody has chosen a host yet would train everyone to ignore red.
-  deploy:
-    name: Deploy · roll out to the host
+  # ── 7. Infra: Terraform formats and validates ──────────────────────────────
+  infra:
+    name: Infra · terraform fmt + validate
     runs-on: ubuntu-latest
-    needs: release
+    defaults:
+      run:
+        working-directory: infra/gcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+
+  # ── 8. Deploy (CD): promote the released images to Cloud Run ───────────────
+  # Self-disabling: until the GCP_* repository variables exist (outputs of
+  # `terraform apply` in infra/gcp) the job reports that CD stops at the
+  # registry and exits green. A deploy step that fails because nobody has
+  # provisioned the target yet would train everyone to ignore red.
+  #
+  # No key file anywhere: GitHub's OIDC token is exchanged for a short-lived
+  # credential through Workload Identity Federation, restricted (in Terraform)
+  # to this repository's main branch and version tags.
+  deploy:
+    name: Deploy · Cloud Run (migrate, roll out, verify)
+    runs-on: ubuntu-latest
+    needs: [release, infra]
     if: >-
       github.ref == 'refs/heads/main' ||
       startsWith(github.ref, 'refs/tags/v') ||
       inputs.deploy
-    environment: production # gate approvals/secrets here in repo settings
+    environment: production # approvals gate here (repo Settings -> Environments)
+    permissions:
+      contents: read
+      id-token: write # OIDC token for Workload Identity Federation
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false # never interrupt a rollout half-way
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      GHCR_REPO: ${{ needs.release.outputs.ghcr_repo }}
+      TAG: ${{ needs.release.outputs.image_tag }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: Check the deploy target is configured
         id: gate
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          if [ -z "$DEPLOY_HOST" ]; then
+          if [ -z "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ] || [ -z "$PROJECT" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "No DEPLOY_HOST secret — CD stops at GHCR." >> "$GITHUB_STEP_SUMMARY"
-            echo "See docs/CICD.md § Deploy to enable it." >> "$GITHUB_STEP_SUMMARY"
+            echo "GCP_* repository variables not set — CD stops at GHCR." >> "$GITHUB_STEP_SUMMARY"
+            echo "See infra/gcp/README.md § Connect CI." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install SSH key
+      - name: Authenticate to Google Cloud (WIF)
         if: steps.gate.outputs.configured == 'true'
-        run: |
-          install -m 700 -d ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          # Pinned host key, never `StrictHostKeyChecking=no`: TOFU over a public
-          # runner is an unauthenticated first connection to a box we then hand a
-          # deploy to. Generate with: ssh-keyscan -H <host>
-          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
 
-      - name: Pull + roll out (pinned to this commit's images)
+      - uses: google-github-actions/setup-gcloud@v2
         if: steps.gate.outputs.configured == 'true'
-        env:
-          HOST: ${{ secrets.DEPLOY_HOST }}
-          USER_NAME: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          GHCR_REPO: ${{ needs.release.outputs.ghcr_repo }}
-          IMAGE_TAG: ${{ needs.release.outputs.image_tag }}
-        run: |
-          ssh -o BatchMode=yes "${USER_NAME}@${HOST}" bash -se <<EOSSH
-          set -euo pipefail
-          cd "${DEPLOY_PATH}"
-          git fetch --all --prune
-          git checkout --force ${{ github.sha }}
-          export GHCR_REPO="${GHCR_REPO}" IMAGE_TAG="${IMAGE_TAG}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          COMPOSE="docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile app"
-          \$COMPOSE pull
-          # api carries RUN_MIGRATIONS=1, so `up -d` applies alembic upgrade head
-          # once, before it serves. See deploy/docker-compose.prod.yml.
-          \$COMPOSE up -d --remove-orphans
-          docker image prune -f
-          EOSSH
 
-      - name: Smoke test (the deploy is not done until the app answers)
+      - name: Promote the scanned images (same digest) to Artifact Registry
+        # Retag, never rebuild: the bytes that serve users are the bytes the
+        # gates above passed.
         if: steps.gate.outputs.configured == 'true'
-        env:
-          HEALTH_URL: ${{ secrets.DEPLOY_HEALTH_URL }}
         run: |
-          if [ -z "$HEALTH_URL" ]; then
-            echo "::warning::DEPLOY_HEALTH_URL not set — rollout unverified."
-            exit 0
-          fi
-          for i in $(seq 1 30); do
-            code=$(curl -fsS -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)
-            if [ "$code" = "200" ]; then
-              echo "healthy after ${i} attempt(s)"
-              exit 0
-            fi
-            sleep 5
+          AR="${REGION}-docker.pkg.dev/${PROJECT}/veriscope"
+          echo "AR=$AR" >> "$GITHUB_ENV"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          for img in backend frontend; do
+            docker pull "${GHCR_REPO}/${img}:${TAG}"
+            docker tag  "${GHCR_REPO}/${img}:${TAG}" "${AR}/${img}:${TAG}"
+            docker push "${AR}/${img}:${TAG}"
           done
-          echo "::error::Health check never returned 200 at $HEALTH_URL."
-          echo "Roll back: re-run this workflow from the previous green commit," >> "$GITHUB_STEP_SUMMARY"
-          echo "or on the host set IMAGE_TAG=<previous sha> and re-run compose up -d." >> "$GITHUB_STEP_SUMMARY"
-          exit 1
+
+      - name: Migrate (Cloud Run Job, before any new revision takes traffic)
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          gcloud run jobs update veriscope-migrate --region "$REGION" \
+            --image "${AR}/backend:${TAG}" --quiet
+          gcloud run jobs execute veriscope-migrate --region "$REGION" --wait
+
+      - name: Roll out worker, api, web
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          for svc in worker api; do
+            gcloud run deploy "veriscope-${svc}" --region "$REGION" \
+              --image "${AR}/backend:${TAG}" \
+              --update-env-vars "APP_VERSION=${TAG}" --quiet
+          done
+          gcloud run deploy veriscope-web --region "$REGION" \
+            --image "${AR}/frontend:${TAG}" --quiet
+
+      - name: Verify (the deploy is not done until the app answers)
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          API=$(gcloud run services describe veriscope-api --region "$REGION" --format 'value(status.url)')
+          WEB=$(gcloud run services describe veriscope-web --region "$REGION" --format 'value(status.url)')
+          for url in "$API/readyz" "$WEB/livez" "$WEB/api/health"; do
+            ok=0
+            for i in $(seq 1 30); do
+              if curl -fsS -o /dev/null "$url"; then ok=1; break; fi
+              sleep 5
+            done
+            if [ "$ok" != 1 ]; then
+              echo "::error::$url never became ready."
+              {
+                echo "### Deploy verification failed at $url"
+                echo "Roll back each service to its previous revision:"
+                echo '```'
+                echo "gcloud run services update-traffic veriscope-api --region $REGION --to-revisions=PREVIOUS_REVISION=100"
+                echo '```'
+                echo "Migrations are expand-only (docs/RUNBOOK.md), so the previous revision runs on the new schema."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+          echo "Deployed ${TAG}: $WEB" >> "$GITHUB_STEP_SUMMARY"

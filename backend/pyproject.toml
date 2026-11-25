@@ -12,12 +12,15 @@ dependencies = [
     "alembic>=1.13",
     "asyncpg>=0.29",
     "redis>=5.0",
+    # Migration window only (VECTOR_BACKEND=qdrant / VECTOR_DUAL_WRITE and
+    # scripts/backfill_pgvector.py). Remove with app/stores/qdrant_store.py.
     "qdrant-client>=1.12,<1.13",
     "httpx>=0.27",
     "tenacity>=9.0",
     "prometheus-client>=0.20",
     "langgraph>=0.2.60",
     "rank-bm25>=0.2.2",
+    "numpy>=1.26",
     "pymupdf4llm>=0.0.17",
     "pymupdf>=1.24",
     "python-multipart>=0.0.9",
@@ -34,6 +37,13 @@ ml = [
 # multi-node deployments; the default local backend needs nothing extra.
 s3 = [
     "boto3>=1.34",
+]
+# Google Cloud: the GCS library backend (BLOB_BACKEND=gcs) and Vertex AI auth
+# (VERTEX_PROJECT). Both use Application Default Credentials - the Cloud Run
+# service account in production - so no key file exists anywhere.
+gcp = [
+    "google-cloud-storage>=2.16",
+    "google-auth>=2.29",
 ]
 # OpenTelemetry distributed tracing (OTEL_ENABLED=true). Optional; the app
 # degrades to a no-op when these aren't installed.
@@ -66,11 +76,15 @@ dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    "fakeredis[lua]>=2.23",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: needs a real Postgres with pgvector at TEST_DATABASE_URL (skipped otherwise)",
+]
 
 [tool.ruff]
 line-length = 100

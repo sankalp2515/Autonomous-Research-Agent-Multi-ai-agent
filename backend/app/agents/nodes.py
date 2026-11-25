@@ -158,6 +158,12 @@ def _timed(node_name: str):
 
 _MAX_EXCLUSIONS = 300
 
+# Output budget for ONE screening call: 15 verdicts, each with a reason and an
+# evidence profile. At the router's 4,096 default the JSON was cut off mid-list
+# and the repair returned only the verdicts it could see (see _screen_papers).
+# A cap, not a target: a provider bills the tokens it writes, not this number.
+_SCREEN_MAX_TOKENS = 8192
+
 # Ladder stages, in the order a paper passes through them.
 FUNNEL_STAGES = (
     "discovered", "screened", "eligible", "full_text_available",
@@ -652,12 +658,14 @@ async def _screen_papers(state: PipelineState, hits: list, objective: str,
             f"Research objective: {objective}\nField: {field}\n\n"
             f"Candidate papers:\n{_numbered(batch)}\n\n"
             + rule
-            + "\nReturn a 0-1 relevance score and a one-line reason for each."
+            + "\nReturn a 0-1 relevance score and a one-line reason for EVERY "
+            "candidate listed, using its [index] exactly as shown."
             + profile_rule
         )
         async with sem:
             try:
-                return await complete_json("screen", prompt, ScreeningResult)
+                return await complete_json("screen", prompt, ScreeningResult,
+                                           max_tokens=_SCREEN_MAX_TOKENS)
             except Exception:
                 # ONE RETRY. A failed batch now EXCLUDES its papers rather than
                 # admitting them unassessed, which is correct but makes a single
@@ -665,37 +673,85 @@ async def _screen_papers(state: PipelineState, hits: list, objective: str,
                 # live run. Retrying once is much cheaper than losing them.
                 logger.info("screening batch failed, retrying once",
                             extra={"batch": len(batch)})
-                return await complete_json("screen", prompt, ScreeningResult)
+                return await complete_json("screen", prompt, ScreeningResult,
+                                           max_tokens=_SCREEN_MAX_TOKENS)
+
+    verdict_of: dict[int, object] = {}
+    call_failed: set[int] = set()
+    tally = {"foreign": 0, "rescreened": 0}
+
+    async def _assess(round_batches: list[list[tuple[int, object]]]) -> None:
+        """Screen these batches and file every verdict under the paper it is
+        actually ABOUT.
+
+        Two ways a batch came back incomplete, both measured on a published
+        review (evals/screening_bench.py, Hall 2012) before this existed:
+          * NO VERDICT for some candidates. 15 papers x a profile each overran
+            the output budget; the JSON repair saw only the first 3,000 chars
+            of the truncated output and returned verdicts for those alone. It
+            validated, so the rest of the batch vanished - 78 of 304 records -
+            and the funnel counted them as "screened out".
+          * A verdict whose index was NOT in this batch (the repair renumbers).
+            The keep-set is built against the whole candidate list, so such a
+            verdict decided a paper this call never showed the model.
+        So a verdict counts only for an index its own prompt carried, and a
+        candidate without one is UNASSESSED - never screened out."""
+        settled = await asyncio.gather(
+            *(_screen_batch(b) for b in round_batches), return_exceptions=True)
+        state["llm_calls_used"] = state.get("llm_calls_used", 0) + len(round_batches)
+        for batch, result in zip(round_batches, settled):
+            ids = {i for i, _ in batch}
+            if isinstance(result, Exception):
+                call_failed.update(ids - set(verdict_of))
+                continue
+            for p in result.papers:
+                if p.index not in ids:
+                    tally["foreign"] += 1
+                    continue
+                if p.index not in verdict_of:
+                    verdict_of[p.index] = p
+                    call_failed.discard(p.index)
 
     try:
-        settled = await asyncio.gather(
-            *(_screen_batch(b) for b in batches), return_exceptions=True)
-        state["llm_calls_used"] = state.get("llm_calls_used", 0) + len(batches)
+        await _assess(batches)
+        # ONE MORE ROUND for every candidate the first left unassessed, in
+        # smaller batches (a smaller output is what failed to fit). Bounded:
+        # one round, and only while budget remains.
+        pending = [(i, h) for i, h in enumerate(head) if i not in verdict_of]
+        if pending and budget_left(state, settings.run_max_llm_calls,
+                                   settings.run_max_wall_seconds):
+            size = max(3, settings.screen_batch_size // 2)
+            tally["rescreened"] = len(pending)
+            await _assess([pending[i:i + size] for i in range(0, len(pending), size)])
 
-        # A batch that failed screened NOTHING. Its papers are unscreened, so
-        # they are dropped — the whole point of this phase is that unscreened
-        # candidates never reach ingest. Losing 30 papers to a provider error is
-        # a real cost, but a smaller one than poisoning the corpus, and it is
-        # recorded rather than absorbed.
-        verdicts: list = []
-        lost = 0
-        for batch, result in zip(batches, settled):
-            if isinstance(result, Exception):
-                lost += len(batch)
-                for _, h in batch:
-                    _exclude(state, h.title, "screen_failed",
-                             "the screening call for this batch failed, so the "
-                             "paper was never assessed")
-                continue
-            verdicts.extend(result.papers)
-        if lost:
-            state.setdefault("coverage_notes", []).append(
-                f"{lost} candidate(s) could not be screened (the screening call "
-                "failed) and were excluded rather than admitted unassessed.")
-        if not verdicts:
+        if not verdict_of:
             raise RuntimeError("every screening batch failed")
 
-        res = ScreeningResult(papers=verdicts)
+        # Whatever is STILL unassessed leaves the funnel as exactly that. These
+        # are facts about Veriscope, not about the papers, and the flow diagram
+        # shows them in their own box rather than inside "screened out".
+        unassessed = [(i, h) for i, h in enumerate(head) if i not in verdict_of]
+        lost_call = sum(1 for i, _ in unassessed if i in call_failed)
+        for i, h in unassessed:
+            if i in call_failed:
+                _exclude(state, h.title, "screen_failed",
+                         "the screening call for this paper failed, so it was "
+                         "never assessed")
+            else:
+                _exclude(state, h.title, "screen_no_verdict",
+                         "the screen returned no verdict for this paper, so it "
+                         "was never assessed")
+        if unassessed:
+            state.setdefault("coverage_notes", []).append(
+                f"{len(unassessed)} candidate(s) could not be screened "
+                f"({lost_call} in a failed screening call, "
+                f"{len(unassessed) - lost_call} returned without a verdict) and "
+                "were excluded rather than admitted unassessed.")
+        if tally["foreign"]:
+            logger.warning("screen returned verdicts for papers outside their batch",
+                           extra={"count": tally["foreign"]})
+
+        res = ScreeningResult(papers=list(verdict_of.values()))
         keep = {p.index for p in res.papers if p.relevant and p.score >= 0.5}
 
         # Profiles are keyed by the same identity the dedup used, so ingest can
@@ -723,18 +779,22 @@ async def _screen_papers(state: PipelineState, hits: list, objective: str,
         # entered the corpus and were published as studies. A thin corpus is a
         # true fact about the question; a padded one is a false one.
         screened = [h for i, h in enumerate(head) if i in keep]
-        dropped = len(head) - len(screened)
-        # Funnel telemetry: `screened` is now what was ACTUALLY assessed, which
-        # is what the report footer claims it is.
+        judged_out = len(verdict_of) - len(screened)
+        # Funnel telemetry. `screened` is what a verdict ACTUALLY covered and
+        # `screened_out` what a verdict excluded. A candidate nobody assessed is
+        # in neither: it is `screen_unassessed`.
         state["funnel"] = {
             **state.get("funnel", {}),
-            "screened": len(head),
-            "screened_out": dropped,
+            "screened": len(verdict_of),
+            "screened_out": judged_out,
             "screened_in": len(screened),
+            "screen_unassessed": len(unassessed),
+            "screen_rescreened": tally["rescreened"],
+            "screen_foreign_verdicts": tally["foreign"],
         }
-        if dropped > 0:
+        if judged_out > 0:
             state.setdefault("coverage_notes", []).append(
-                f"{dropped} off-topic paper(s) screened out before drafting "
+                f"{judged_out} off-topic paper(s) screened out before drafting "
                 "(shared keywords but the wrong subject).")
         if not screened:
             state.setdefault("coverage_notes", []).append(
@@ -923,12 +983,12 @@ async def research_node(state: PipelineState) -> PipelineState:
                 # check that only runs before the queue cannot stop the queue.
                 await raise_if_cancelled(state, "ingest")
                 # Library-first: reuse a previously downloaded PDF, else fetch once.
-                if key and blob_store.has_pdf(key):
-                    pdf = blob_store.load_pdf(key)
+                if key and await blob_store.ahas_pdf(key):
+                    pdf = await blob_store.aload_pdf(key)
                 elif hit.pdf_url:
                     pdf = await sources.download_pdf(hit.pdf_url)
                     if pdf and key:
-                        blob_store.save_pdf(key, pdf)
+                        await blob_store.asave_pdf(key, pdf)
             # Phase 2 — PARSE + EMBED (smaller budget; embeds serialize on the lock).
             async with sem:
                 await raise_if_cancelled(state, "ingest")
@@ -3460,6 +3520,13 @@ async def assemble_node(state: PipelineState) -> PipelineState:
             "found": _f.get("found", 0),
             "screened": _f.get("screened", 0),
             "screened_out": _f.get("screened_out", 0),
+            "screened_in": _f.get("screened_in", 0),
+            # Candidates no screening verdict ever covered (a failed call, or a
+            # response that came back without them). A fact about Veriscope,
+            # shown in its own box, never folded into "screened out".
+            "screen_unassessed": _f.get("screen_unassessed", 0),
+            "screen_rescreened": _f.get("screen_rescreened", 0),
+            "screen_foreign_verdicts": _f.get("screen_foreign_verdicts", 0),
             "extracted_studies": _f.get("extracted_studies", 0),
             "extracted_findings": _f.get("extracted_findings", 0),
             "extraction_refused": _f.get("extraction_refused", 0),

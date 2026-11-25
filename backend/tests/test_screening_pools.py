@@ -66,7 +66,9 @@ async def test_interleave_alternates_pools(state, monkeypatch):
     captured = {}
 
     async def fake_complete_json(_kind, prompt, _schema, **_kw):
-        captured["prompt"] = prompt
+        # The FIRST prompt is the ordering under test; this fake answers only
+        # index 0, so the unassessed rest are re-screened in a second round.
+        captured.setdefault("prompt", prompt)
         from app.agents.schemas import ScreenedPaper, ScreeningResult
         return ScreeningResult(papers=[
             ScreenedPaper(index=0, relevant=True, reason="ok", score=0.9)])

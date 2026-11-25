@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -44,12 +45,58 @@ PIPELINE_NODE_SECONDS = Histogram(
 INGEST_DOCS = Counter(
     "ingest_documents_total", "Documents ingested", ["source_type", "outcome"]
 )
+QUEUE_DEPTH = Gauge(
+    "job_queue_depth", "Jobs waiting (main) or dead-lettered (dead)", ["queue"]
+)
+# Dense retrieval failed and the caller fell back to lexical-only ranking. The
+# run still completes, so without this counter the degradation is invisible:
+# the report reads exactly as confident with half its retrieval missing.
+RETRIEVAL_DEGRADED = Counter(
+    "retrieval_dense_degraded_total",
+    "Dense retrieval failed; ranking fell back to lexical only", ["path"],
+)
 
 
 def _consteq(a: str, b: str) -> bool:
     """Constant-time comparison to avoid leaking the token via timing."""
     import hmac
     return hmac.compare_digest(a, b)
+
+
+def client_ip(request: Request, settings) -> str:
+    """The caller's IP. Behind a proxy we take the entry `trusted_proxy_hops`
+    from the RIGHT of X-Forwarded-For: proxies APPEND, so the left-most entry is
+    whatever the client chose to send and the old `split(",")[0]` let anyone
+    pick their own rate-limit bucket by sending the header."""
+    if settings.trust_forwarded_for:
+        xff = request.headers.get("x-forwarded-for", "")
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        hops = max(1, int(getattr(settings, "trusted_proxy_hops", 1)))
+        if len(parts) >= hops:
+            return parts[-hops]
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limit_subject(request: Request, settings) -> str:
+    """Who the budget belongs to: a VERIFIED user, else the client IP.
+
+    The bucket used to be keyed on a hash of whatever bearer string arrived,
+    verified or not - so sending a fresh random token per request bought a fresh
+    budget per request, i.e. no rate limit at all for anyone willing to lie.
+    Verification is a cached-JWKS signature check (tens of microseconds)."""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer ") and not settings.auth_disabled:
+        try:
+            from app.api.deps import _verify
+            sub = _verify(auth[7:]).get("sub")
+            if sub:
+                return "u:" + str(sub)
+        except Exception:
+            pass  # unverifiable token: budget falls to the IP
+    elif auth.lower().startswith("bearer "):
+        import hashlib
+        return "u:" + hashlib.sha256(auth[7:].encode()).hexdigest()[:16]  # dev only
+    return "ip:" + client_ip(request, settings)
 
 
 def install_observability(app: FastAPI) -> None:
@@ -61,14 +108,17 @@ def install_observability(app: FastAPI) -> None:
         try:
             response: Response = await call_next(request)
         except Exception:
-            HTTP_REQUESTS.labels(request.method, request.url.path, "500").inc()
+            # The ROUTE TEMPLATE, never the raw path: raw paths carry ids, and
+            # one label value per id is an unbounded metric series.
+            _r = request.scope.get("route")
+            HTTP_REQUESTS.labels(request.method, getattr(_r, "path", "unmatched"), "500").inc()
             logger.exception("request failed", extra={"path": request.url.path})
             raise
         finally:
             request_id_var.reset(token)
         elapsed = time.perf_counter() - start
         route = request.scope.get("route")
-        route_path = getattr(route, "path", request.url.path)
+        route_path = getattr(route, "path", "unmatched")
         HTTP_REQUESTS.labels(request.method, route_path, str(response.status_code)).inc()
         HTTP_LATENCY.labels(request.method, route_path).observe(elapsed)
         response.headers["x-request-id"] = request_id
@@ -105,15 +155,7 @@ def install_observability(app: FastAPI) -> None:
                 from app.stores.redis_store import get_redis
                 settings = get_settings()
 
-                # Subject: hash of the bearer token if present, else client IP.
-                auth = request.headers.get("authorization", "")
-                if auth.lower().startswith("bearer "):
-                    import hashlib
-                    subject = "u:" + hashlib.sha256(auth[7:].encode()).hexdigest()[:16]
-                elif settings.trust_forwarded_for and request.headers.get("x-forwarded-for"):
-                    subject = "ip:" + request.headers["x-forwarded-for"].split(",")[0].strip()
-                else:
-                    subject = "ip:" + (request.client.host if request.client else "unknown")
+                subject = rate_limit_subject(request, settings)
 
                 # Tighter bucket for the expensive pipeline launch.
                 expensive = (request.method == "POST"

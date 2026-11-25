@@ -17,8 +17,9 @@ for that dimension actually is:
 
   1. one lexical (BM25) index per document, queried with the dimension's own
      terminology (name + synonyms + metrics + the entities under study);
-  2. dense ANN scoped INSIDE the document (see qdrant_store.search document_ids —
-     without that filter, doc-scoped dense retrieval was returning nothing);
+  2. dense ranking scoped INSIDE the document (vector_store.rank_within_document:
+     one fetch of the paper's vectors, exact cosine in memory — a project-wide
+     search filtered afterwards used to return almost nothing for one paper);
   3. RRF fusion of every variant's ranking, exactly as the main retriever does;
   4. deterministic evidence priors — a QUANTITATIVE dimension prefers chunks that
      actually carry numbers and unit tokens, and any dimension prefers chunks
@@ -45,7 +46,7 @@ from app.core.logging import get_logger
 from app.db.models import Chunk, Document
 from app.ml.local_models import embed_texts, rerank
 from app.retrieval.hybrid import RetrievedChunk
-from app.stores.qdrant_store import search as qdrant_search
+from app.stores import vector_store
 
 logger = get_logger("retrieval.dimension")
 
@@ -315,6 +316,24 @@ async def retrieve_by_dimension(
             vectors = []
     vec_of = {q: v for q, v in zip(flat, vectors)} if vectors else {}
 
+    # Dense ranking for EVERY query of this paper in one fetch. This used to be
+    # one Qdrant round trip per (axis x query angle) - 15-25 network calls to
+    # rank the paper's own ~60 chunks. Now the paper's vectors come back in one
+    # query and each ranking is an in-memory product (exact, deterministic).
+    dense_of: dict[str, list[str]] = {}
+    if vec_of:
+        try:
+            texts = list(vec_of)
+            ranked = await vector_store.rank_within_document(
+                project_id, doc_id, [vec_of[t] for t in texts], limit=20,
+                session=session)
+            dense_of = {t: [cid for cid in r if cid in by_id]
+                        for t, r in zip(texts, ranked)}
+        except Exception:
+            vector_store.record_dense_failure("dimension")
+            logger.warning("dimension dense ranking failed; lexical only",
+                           extra={"document_id": doc_id})
+
     coverage: dict[str, DimensionHits] = {}
     picks: dict[str, list[str]] = {}
 
@@ -325,16 +344,9 @@ async def retrieve_by_dimension(
             scores = bm25.get_scores(_tokenize(q.text))
             rankings.append(([cid for _, cid in sorted(
                 zip(scores, ids), key=lambda t: t[0], reverse=True)][:20], q.weight))
-            vec = vec_of.get(q.text)
-            if vec is not None:
-                try:
-                    hits = await qdrant_search(vec, project_id, limit=20,
-                                               document_ids=[doc_id])
-                    dense = [cid for cid, _ in hits if cid in by_id]
-                    if dense:
-                        rankings.append((dense, q.weight))
-                except Exception:
-                    logger.info("dimension dense search failed; lexical only")
+            dense = dense_of.get(q.text)
+            if dense:
+                rankings.append((dense, q.weight))
 
         fused = weighted_rrf([r for r in rankings if r[0]], k=settings.rrf_k)
         if not fused:

@@ -573,6 +573,11 @@ export interface Report {
       found?: number;
       screened?: number;
       screened_out?: number;
+      // Candidates no screening verdict ever covered: a failed call, or a
+      // response that came back without them. About Veriscope, not the papers.
+      screen_unassessed?: number;
+      screen_rescreened?: number;
+      screen_foreign_verdicts?: number;
       // "researcher" when the candidates were screened by a human in the
       // pre-run screening table, "screen" when the pipeline screened them.
       screened_by?: string;

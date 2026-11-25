@@ -161,6 +161,24 @@ async def current_user(authorization: str | None = Header(default=None)) -> str:
     return sub or "local"
 
 
+def _claims(token: str) -> dict | None:
+    """Verified claims; or, ONLY when auth is disabled (local dev), unverified.
+
+    These helpers used to fall back to an unverified decode whenever
+    verification failed - in production too. current_email feeds invitation
+    matching, so a forged token naming someone else's email was one missing
+    `current_user` dependency away from accepting their invite."""
+    try:
+        return _verify(token)
+    except Exception:
+        if get_settings().auth_disabled:
+            try:
+                return jwt.decode(token, options={"verify_signature": False})
+            except jwt.PyJWTError:
+                return None
+        return None
+
+
 async def current_name(authorization: str | None = Header(default=None)) -> str:
     """Best-effort display name from the token (name / full_name / email local
     part), or "". Never raises."""
@@ -168,10 +186,9 @@ async def current_name(authorization: str | None = Header(default=None)) -> str:
         return ""
     token = authorization.split(" ", 1)[1]
     try:
-        try:
-            p = _verify(token)
-        except Exception:
-            p = jwt.decode(token, options={"verify_signature": False})
+        p = _claims(token)
+        if p is None:
+            return ""
         meta = p.get("user_metadata") or {}
         name = (p.get("name") or meta.get("full_name") or meta.get("name") or "")
         if not name and p.get("email"):
@@ -189,10 +206,9 @@ async def current_email(authorization: str | None = Header(default=None)) -> str
         return ""
     token = authorization.split(" ", 1)[1]
     try:
-        try:
-            payload = _verify(token)
-        except Exception:
-            payload = jwt.decode(token, options={"verify_signature": False})
+        payload = _claims(token)
+        if payload is None:
+            return ""
         return (payload.get("email") or "").strip().lower()
     except jwt.PyJWTError:
         return ""
