@@ -43,11 +43,11 @@ async def test_gemini_key_is_sent_as_a_header_not_in_the_url(monkeypatch):
 @pytest.mark.parametrize("fmt", ["json", "console"])
 @pytest.mark.parametrize("secret_line", [
     f"Server error '503' for url 'https://x.googleapis.com/v1/m:gen?key={FAKE_KEY}'",
-    "GET https://api.example.com/v1?api_key=abcd1234efgh5678&x=1",
-    "headers={'Authorization': 'Bearer abcdefghijklmnop.qrs'}",
-    "x-goog-api-key: abcdefgh12345678",
+    "GET https://api.example.com/v1?api_key=abcd1234efgh5678&x=1",  # gitleaks:allow (fake value under test)
+    "headers={'Authorization': 'Bearer abcdefghijklmnop.qrs'}",  # gitleaks:allow (fake value under test)
+    "x-goog-api-key: abcdefgh12345678",  # gitleaks:allow (fake value under test)
     "invalid key gsk-" + "a" * 20,
-    "key AQ.FAKEfakeFAKEfakeFAKEfakeFAKEfake0123456789",
+    "key AQ.FAKEfakeFAKEfakeFAKEfakeFAKEfake0123456789",  # gitleaks:allow (fake value under test)
 ])
 def test_formatters_redact_credentials_everywhere_on_the_line(fmt, secret_line):
     stream = io.StringIO()
